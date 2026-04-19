@@ -1,0 +1,46 @@
+# Line-ending normalisation — protects cross-platform checkouts.
+# koi develops on native Windows but ships cross-platform; POSIX scripts MUST
+# stay LF or they break under Git Bash / WSL on Windows checkouts.
+# Default: let Git normalise text files to LF in the repo, native on checkout.
+* text=auto
+
+# Shell scripts MUST stay LF — Claude Code runs .sh hooks through Git Bash on
+# Windows; CRLF breaks them (windows-native-dev-stance).
+*.sh   text eol=lf
+*.bash text eol=lf
+
+# Windows-native scripts want CRLF.
+*.ps1 text eol=crlf
+*.psm1 text eol=crlf
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# Explicit text types (avoid heuristic surprises). Python pinned LF.
+*.py   text eol=lf
+*.rs   text
+*.ts   text
+*.js   text
+*.json text
+*.md   text
+*.yaml text
+*.yml  text
+*.toml text
+
+# Binary types — never normalise or diff as text.
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.gif  binary
+*.ico  binary
+*.icns binary
+*.pdf  binary
+*.zip  binary
+*.gz   binary
+*.tar  binary
+*.7z   binary
+*.woff binary
+*.woff2 binary
+*.ttf  binary
+*.otf  binary
+*.db   binary
+*.sqlite binary

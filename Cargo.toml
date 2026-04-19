@@ -1,0 +1,58 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/koi-core",
+    "crates/koi-daemon",
+    "crates/koi-cli",
+    "crates/koi-tray",
+    "crates/koi-plugins",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.91"
+license = "LicenseRef-FSL-1.1-Apache-2.0"
+# Vendor only; no personal contact in the public surface.
+# Add a deliberate public contact (e.g. "Powell-Clark Limited <support@…>") here if desired.
+authors = ["Powell-Clark Limited"]
+repository = "https://github.com/powell-clark/koi"
+
+[workspace.dependencies]
+koi-core = { path = "crates/koi-core" }
+koi-plugins = { path = "crates/koi-plugins" }
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+tracing-appender = "0.2"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "fs", "time", "sync"] }
+rusqlite = { version = "0.33", features = ["bundled", "chrono"] }
+sysinfo = "0.33"
+clap = { version = "4", features = ["derive", "env"] }
+clap_complete = "4"
+anyhow = "1"
+chrono = { version = "0.4", features = ["serde"] }
+directories = "5"
+walkdir = "2"
+rayon = "1"
+byte-unit = "5"
+git2 = { version = "0.19", default-features = false, features = ["vendored-libgit2"] }
+
+# Tauri v2 for system tray application
+tauri = { version = "2.11", features = ["macos-private-api", "tray-icon", "image-png"] }
+tauri-build = "2.1"
+wry = "0.48"
+tempfile = "3"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
+opt-level = 3
+
+[profile.dev]
+opt-level = 0
+debug = true

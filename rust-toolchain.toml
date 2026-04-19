@@ -1,0 +1,7 @@
+# Pinned toolchain — reproducible builds across local dev, CI, and all three
+# target OSes. Without this, CI's "stable" drifts ahead of local and new clippy
+# lints break the build on every Rust release. Matches workspace rust-version
+# (MSRV) in Cargo.toml. Bump deliberately, then fix any new lints in one commit.
+[toolchain]
+channel = "1.91.0"
+components = ["rustfmt", "clippy"]
