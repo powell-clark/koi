@@ -1,0 +1,28 @@
+[package]
+name = "koi-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Platform-agnostic core: monitor trait, types, state, storage"
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+chrono.workspace = true
+sysinfo.workspace = true
+rusqlite.workspace = true
+directories.workspace = true
+walkdir.workspace = true
+rayon.workspace = true
+byte-unit.workspace = true
+git2.workspace = true
+
+[dev-dependencies]
+rusqlite.workspace = true
+tempfile.workspace = true
