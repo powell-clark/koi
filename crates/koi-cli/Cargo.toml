@@ -1,0 +1,28 @@
+[package]
+name = "koi-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "koi command-line interface"
+
+[[bin]]
+name = "koi"
+path = "src/main.rs"
+
+[dependencies]
+koi-core.workspace = true
+clap.workspace = true
+clap_complete.workspace = true
+anyhow.workspace = true
+serde_json.workspace = true
+rusqlite.workspace = true
+chrono.workspace = true
+directories.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+toml = "0.8"
+shellexpand = "3"
+walkdir.workspace = true
