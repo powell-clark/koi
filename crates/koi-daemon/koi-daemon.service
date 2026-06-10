@@ -1,0 +1,33 @@
+[Unit]
+Description=Koi - System caretaker daemon
+Documentation=https://github.com/powell-clark/koi
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Assumes the binary is built and symlinked or copied to ~/.local/bin/koi-daemon.
+# For development, replace with an absolute path to target/release/koi-daemon.
+ExecStart=%h/.local/bin/koi-daemon
+Restart=on-failure
+RestartSec=30
+Environment="RUST_LOG=koi_daemon=info,koi_core=info"
+
+# Sandboxing — koi reads user state but should not touch secrets or SSH.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-write
+# Only write to the state dir; read-only elsewhere under $HOME.
+ReadWritePaths=%h/.local/share/koi %h/.cache/koi
+InaccessiblePaths=%h/.ssh %h/.gnupg %h/Documents/Personal
+
+# Resource hygiene — monitoring shouldn't cost the whole system.
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+MemoryMax=256M
+TasksMax=32
+
+[Install]
+WantedBy=default.target

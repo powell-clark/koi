@@ -1,0 +1,26 @@
+[package]
+name = "koi-daemon"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Long-running koi service — scheduler, event loop, monitor host"
+
+[[bin]]
+name = "koi-daemon"
+path = "src/main.rs"
+
+[dependencies]
+koi-core.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+tracing-appender.workspace = true
+directories.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+rusqlite.workspace = true
+anyhow.workspace = true
+chrono.workspace = true

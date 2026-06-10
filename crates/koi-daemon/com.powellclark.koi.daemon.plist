@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.powellclark.koi.daemon</string>
+
+    <!-- Installed path: ~/Library/Application Support/koi/bin/koi-daemon, or
+         ~/.local/bin/koi-daemon if user prefers the XDG-style layout.
+         Replace the ProgramArguments path to match your install. -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/YOURNAME/.local/bin/koi-daemon</string>
+    </array>
+
+    <!-- Run at login, restart on crash. -->
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+        <key>Crashed</key>
+        <true/>
+    </dict>
+
+    <!-- 30-second backoff after failure to match the systemd unit's RestartSec=30. -->
+    <key>ThrottleInterval</key>
+    <integer>30</integer>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>RUST_LOG</key>
+        <string>koi_daemon=info,koi_core=info</string>
+    </dict>
+
+    <!-- Logs to launchd-managed paths. koi-daemon also writes its own daily
+         JSON logs to ~/Library/Application Support/koi/logs/ via
+         tracing-appender; these launchd captures are stderr/stdout only. -->
+    <key>StandardErrorPath</key>
+    <string>/tmp/koi-daemon.err</string>
+    <key>StandardOutPath</key>
+    <string>/tmp/koi-daemon.out</string>
+
+    <!-- Resource hygiene — stay out of other apps' way. -->
+    <key>Nice</key>
+    <integer>10</integer>
+    <key>LowPriorityIO</key>
+    <true/>
+
+    <!-- Unload with: launchctl unload ~/Library/LaunchAgents/com.powellclark.koi.daemon.plist -->
+</dict>
+</plist>
