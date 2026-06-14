@@ -1,0 +1,25 @@
+[package]
+name = "koi-tray"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Tauri v2 system tray app for koi consent UI and status display"
+
+[[bin]]
+name = "koi-tray"
+path = "src/main.rs"
+
+[dependencies]
+koi-core.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+tauri.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+rusqlite.workspace = true
+
+[build-dependencies]
+tauri-build.workspace = true

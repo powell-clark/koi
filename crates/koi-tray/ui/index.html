@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>koi</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <header>
+    <div class="brand">koi <small>system health</small></div>
+    <span id="overall" class="pill unknown">—</span>
+  </header>
+
+  <section>
+    <div class="section-title">Monitors</div>
+    <div id="monitors"><div class="empty">Loading…</div></div>
+  </section>
+
+  <section>
+    <div class="section-title">
+      Pending proposals
+      <span id="proposal-count" class="count-badge">0</span>
+    </div>
+    <div id="proposals"><div class="empty">None.</div></div>
+  </section>
+
+  <footer>
+    <span id="updated">—</span>
+    <button id="refresh">Refresh</button>
+  </footer>
+
+  <script src="app.js"></script>
+</body>
+</html>

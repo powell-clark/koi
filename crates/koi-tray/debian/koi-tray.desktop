@@ -1,0 +1,10 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=koi
+Comment=System health monitor and file lifecycle consent UI
+Exec=koi-tray
+Icon=koi-tray
+Categories=System;Monitor;
+StartupNotify=false
+NoDisplay=true
