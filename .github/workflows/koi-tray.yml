@@ -1,0 +1,79 @@
+name: koi-tray
+
+# Cross-platform build matrix for the Tauri tray app.
+# Produces installable bundles on Linux, macOS, and Windows so you can grab a
+# real Mac or Windows build to test without cutting a release.
+# Code signing is deferred — these are unsigned artifacts.
+#
+# On-demand only: these full Tauri bundles (macOS/Windows runners, ~9 min each)
+# are needed occasionally, not per-commit — trigger manually from the Actions
+# tab when you want fresh installers.
+
+on:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  bundle:
+    name: bundle (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Pinned toolchain (see rust-toolchain.toml) for reproducible bundles.
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.91.0
+
+      - name: Cache cargo deps
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: tray-${{ matrix.os }}
+
+      # Tauri v2 Linux system dependencies (Ubuntu 24.04 / webkit2gtk-4.1).
+      - name: Install Linux deps
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libsoup-3.0-dev \
+            libjavascriptcoregtk-4.1-dev \
+            libxdo-dev \
+            patchelf
+
+      - name: Install tauri-cli
+        uses: taiki-e/install-action@v2
+        with:
+          tool: tauri-cli
+
+      - name: Build tray bundle
+        working-directory: crates/koi-tray
+        run: cargo tauri build
+
+      # Bundle outputs land under the workspace target dir, not the crate dir.
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: koi-tray-${{ matrix.os }}
+          path: |
+            target/release/bundle/**/*.deb
+            target/release/bundle/**/*.AppImage
+            target/release/bundle/**/*.dmg
+            target/release/bundle/**/*.app
+            target/release/bundle/**/*.msi
+            target/release/bundle/**/*-setup.exe
+          if-no-files-found: warn
+          retention-days: 14

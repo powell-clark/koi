@@ -1,0 +1,74 @@
+name: ci
+
+# Fast cross-platform check for the logic crates (no GUI/webkit deps).
+# This is the "do the ported monitors compile and pass on macOS and Windows"
+# signal. The expensive macOS/Windows runners only run on push to main (and
+# on-demand); pull requests run ubuntu-only, which catches the bulk of breakage
+# cheaply. Cross-platform breakage still surfaces at merge.
+#
+# Docs-only changes skip the Rust builds (see paths-ignore below) — they cannot
+# affect compilation or tests.
+
+on:
+  push:
+    branches: [main]
+    # Skip Rust builds for docs-only pushes to main.
+    paths-ignore:
+      - 'docs/**'
+      - '**.md'
+      - 'LICENSE*'
+  pull_request:
+    # Skip the ubuntu PR check for docs-only pull requests.
+    paths-ignore:
+      - 'docs/**'
+      - '**.md'
+      - 'LICENSE*'
+  workflow_dispatch:
+    # Manual dispatch always runs — no path restrictions.
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  check:
+    name: build + test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # PRs run ubuntu only (cheap); push-to-main + on-demand run all three
+        # OSes. macOS minutes bill at ~10x Linux, so this is the main saving.
+        os: >-
+          ${{ github.event_name == 'pull_request'
+              && fromJSON('["ubuntu-latest"]')
+              || fromJSON('["ubuntu-latest","macos-latest","windows-latest"]') }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Toolchain version comes from rust-toolchain.toml (pinned for
+      # reproducibility); components are added on top.
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.91.0
+          components: rustfmt, clippy
+
+      - name: Cache cargo deps
+        uses: Swatinem/rust-cache@v2
+        with:
+          # Logic crates only — keyed separately from the tray bundle cache.
+          key: logic-${{ matrix.os }}
+
+      # rustfmt is platform-independent — only need to check it once.
+      - name: Format check
+        if: matrix.os == 'ubuntu-latest'
+        run: cargo fmt --check
+
+      - name: Clippy (deny warnings)
+        run: cargo clippy -p koi-core -p koi-cli -p koi-daemon -p koi-plugins --all-targets -- -D warnings
+
+      - name: Test
+        run: cargo test -p koi-core -p koi-cli -p koi-daemon -p koi-plugins
+

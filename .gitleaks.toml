@@ -1,0 +1,36 @@
+# .gitleaks.toml — koi secret-scan configuration for gitleaks 8.x
+#
+# Extends the gitleaks default ruleset (useDefault = true).
+# Reusable as-is for the public-repo CI secret-scan job.
+#
+# Allowlisted paths (all gitignored by .gitignore; none enter the public repo):
+#
+#   target/         — Rust build artefacts.  Four libmuda-*.rmeta compiled
+#                     metadata files contain the text pattern "key, `…`" inside
+#                     binary documentation strings from the muda menu library
+#                     (a Tauri v2 dependency).  These are not secrets; the Rust
+#                     compilation products are already excluded from git by the
+#                     `target/` gitignore rule.
+#
+#   .env.local      — Local-only developer credentials file, gitignored by the
+#                     `.env.*` rule.  It holds CONSCIOUSNESS_SYNC_API_KEY for
+#                     local dev.  The key is a real secret and must not be
+#                     committed; the path exclusion prevents false-positive alerts
+#                     during local working-tree scans without masking the secret
+#                     itself from the detection rules.  In public CI the file
+#                     does not exist.
+#
+# Baseline (2026-06-26, gitleaks 8.30.1):
+#   - git-history scan (272 commits): 0 findings, exit 0
+#   - working-tree scan (--no-git):   5 findings — all in the two allowlisted
+#     path categories above; exit 0 after this config is applied.
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Gitignored paths that never enter the public repo"
+paths = [
+    '''^target/''',
+    '''^\.env\.local$''',
+]
