@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# Pre-push gate — runs the koi verify suite and aborts the push on any failure.
+# Installed by install-git-hooks.sh alongside (never replacing) existing hooks.
+set -euo pipefail
+
+repo_root="$(git rev-parse --show-toplevel)"
+exec "$repo_root/scripts/verify.sh"
