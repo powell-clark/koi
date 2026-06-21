@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# move-window-with-me — move active window to adjacent workspace and follow it
+# Usage: move-window-with-me left|right
+
+set -euo pipefail
+
+DIR="${1:-right}"
+
+case "$DIR" in
+    left)
+        xdotool key --delay 50 super+shift+Left
+        xdotool key --delay 50 super+Left
+        ;;
+    right)
+        xdotool key --delay 50 super+shift+Right
+        xdotool key --delay 50 super+Right
+        ;;
+    *)
+        echo "Usage: move-window-with-me left|right"; exit 1
+        ;;
+esac

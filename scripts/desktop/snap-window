@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+# snap-window — numpad window tiling via wmctrl
+# Usage: snap-window <position>
+# Positions: left right top bottom center maximize
+#            top-left top-right bottom-left bottom-right
+
+set -euo pipefail
+
+POS="${1:-center}"
+
+# Get usable screen area (excludes panels/docks)
+read -r DX DY DW DH < <(wmctrl -d | awk '/\*/{split($9,a,"x"); split($8,b,","); print b[1], b[2], a[1], a[2]}')
+
+# Gap between windows (pixels)
+GAP=0
+
+HALF_W=$(( DW / 2 ))
+HALF_H=$(( DH / 2 ))
+
+case "$POS" in
+    left|4)       X=$DX;          Y=$DY;          W=$HALF_W;  H=$DH ;;
+    right|6)      X=$(( DX + HALF_W )); Y=$DY;    W=$HALF_W;  H=$DH ;;
+    top|8)        X=$DX;          Y=$DY;          W=$DW;      H=$HALF_H ;;
+    bottom|2)     X=$DX;          Y=$(( DY + HALF_H )); W=$DW; H=$HALF_H ;;
+    center|5)     W=$(( DW * 3 / 4 )); H=$(( DH * 3 / 4 ))
+                  X=$(( DX + (DW - W) / 2 )); Y=$(( DY + (DH - H) / 2 )) ;;
+    maximize|0)   wmctrl -r :ACTIVE: -b add,maximized_vert,maximized_horz; exit 0 ;;
+    top-left|7)   X=$DX;          Y=$DY;          W=$HALF_W;  H=$HALF_H ;;
+    top-right|9)  X=$(( DX + HALF_W )); Y=$DY;    W=$HALF_W;  H=$HALF_H ;;
+    bottom-left|1)  X=$DX;        Y=$(( DY + HALF_H )); W=$HALF_W; H=$HALF_H ;;
+    bottom-right|3) X=$(( DX + HALF_W )); Y=$(( DY + HALF_H )); W=$HALF_W; H=$HALF_H ;;
+    *)            echo "Unknown position: $POS"; exit 1 ;;
+esac
+
+# Remove maximized state first (otherwise wmctrl can't resize)
+wmctrl -r :ACTIVE: -b remove,maximized_vert,maximized_horz
+
+# Move and resize: gravity 0 (default), x, y, width, height
+wmctrl -r :ACTIVE: -e "0,$X,$Y,$W,$H"
