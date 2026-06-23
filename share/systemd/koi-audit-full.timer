@@ -1,0 +1,11 @@
+[Unit]
+Description=Run koi full security audit monthly (1st of month 03:30)
+Requires=koi-audit-full.service
+
+[Timer]
+OnCalendar=*-*-01 03:30:00
+Persistent=true
+Unit=koi-audit-full.service
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,21 @@
+[Unit]
+Description=Koi security audit — full Lynis scan
+After=network.target
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/koi audit
+WorkingDirectory=%h
+
+# CPU/IO constraints: avoid competing with interactive work
+Nice=19
+IOSchedulingClass=3
+
+StandardOutput=append:%h/.local/share/koi/audits/full.log
+StandardError=append:%h/.local/share/koi/audits/full-errors.log
+
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=default.target

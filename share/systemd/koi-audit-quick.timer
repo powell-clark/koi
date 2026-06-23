@@ -1,0 +1,11 @@
+[Unit]
+Description=Run koi quick security audit weekly (Sunday 04:00)
+Requires=koi-audit-quick.service
+
+[Timer]
+OnCalendar=Sun *-*-* 04:00:00
+Persistent=true
+Unit=koi-audit-quick.service
+
+[Install]
+WantedBy=timers.target

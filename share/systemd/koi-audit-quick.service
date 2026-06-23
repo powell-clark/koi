@@ -1,0 +1,21 @@
+[Unit]
+Description=Koi security audit — quick scan (authentication, filesystems, networking)
+After=network.target
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/koi audit --quick
+WorkingDirectory=%h
+
+# CPU/IO constraints: avoid competing with interactive work
+Nice=19
+IOSchedulingClass=3
+
+StandardOutput=append:%h/.local/share/koi/audits/quick.log
+StandardError=append:%h/.local/share/koi/audits/quick-errors.log
+
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=default.target
