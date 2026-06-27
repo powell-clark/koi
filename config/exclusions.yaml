@@ -1,0 +1,136 @@
+# Directories and patterns to exclude from monitoring
+
+exclude_paths:
+  # Temporary directories
+  - /tmp
+  - /var/tmp
+
+  # Build artifacts (expected to be large)
+  - "**/node_modules"
+  - "**/.venv"
+  - "**/__pycache__"
+  - "**/dist"
+  - "**/build"
+
+  # Version control
+  - "**/.git"
+
+  # Known large but necessary
+  - ~/.pyenv/versions
+  - ~/.nvm/versions
+  - ~/.local/share/Steam
+
+exclude_patterns:
+  # File patterns to ignore
+  - "*.log"
+  - "*.tmp"
+  - "*.swp"
+  - "*.bak"
+
+safe_to_clean:
+  # Caches that can be safely cleared
+  caches:
+    - ~/.cache/ms-playwright
+    - ~/.cache/pre-commit
+    - ~/.cache/typescript
+    - ~/.cache/puppeteer
+    - ~/.cache/chrome-devtools-mcp
+    - ~/.cache/tracker3
+    - ~/.cache/Cypress
+    - ~/.npm
+
+  # Docker cleanup is safe with prune
+  docker: true
+
+  # Temp directories
+  temp:
+    - /tmp
+    - ~/.cache/tmp
+
+# Windows-specific paths.
+# Consumed by the Windows branch of DiskMonitor/CacheMonitor and the safe-clean sweep.
+# Paths use %ENVVAR% tokens expanded at runtime on Windows.
+windows:
+  safe_to_clean:
+    # Caches safe to clear automatically — all regenerate on next use
+    - "%TEMP%"
+    - "%LOCALAPPDATA%/Temp"
+    - "%LOCALAPPDATA%/npm-cache"
+    - "%APPDATA%/npm-cache"
+    - "%USERPROFILE%/.cargo/registry/cache"
+    - "%LOCALAPPDATA%/pip/Cache"
+    - "%APPDATA%/Cursor/Cache"
+    - "%APPDATA%/Cursor/Code Cache"
+    # Windows Update download cache — clear ONLY when no update is mid-flight
+    - "%WINDIR%/SoftwareDistribution/Download"
+  protected_paths:
+    # Large but user-owned or OS-critical — never auto-clean; propose-approve only
+    - "%USERPROFILE%/Desktop"
+    - "%USERPROFILE%/Documents"
+    - "%USERPROFILE%/Music"
+    - "%LOCALAPPDATA%/Microsoft"
+    - "%APPDATA%/Microsoft"
+
+# ClamAV virus scanning exclusions
+# Applied to both delta and monthly full scans.
+# Excludes directories that churn constantly without real threat vector
+clamav:
+  # Bulk directories that generate constant noise
+  exclude_paths:
+    # Version managers — self-contained, rarely infected
+    - ~/.nvm
+    - ~/.pyenv
+    - ~/.rbenv
+    - ~/.jenv
+    - ~/.sdkman
+
+    # Package caches and version-specific installations
+    - ~/.cache
+    - ~/.npm
+    - ~/.cargo
+    - ~/.go
+    - ~/.local/share/Trash
+
+    # Docker images and volumes (large, scanned separately)
+    - ~/.docker
+
+    # Build outputs and vendor directories
+    - "**/node_modules"
+    - "**/.venv"
+    - "**/venv"
+    - "**/.env"
+    - "**/dist"
+    - "**/build"
+    - "**/__pycache__"
+
+  # Patterns to exclude (rarely contain threats)
+  exclude_patterns:
+    - "*.log"
+    - "*.tmp"
+    - "*.bak"
+    - "*.swp"
+    - "*.orig"
+
+  # Scan strategy
+  scan_strategy:
+    # Delta scans: only files changed since last AIDE snapshot
+    delta:
+      nice_level: 19
+      ionice_class: 3  # idle class
+      schedule: "daily"  # Run after AIDE check in cron.daily
+
+    # Full scan: monthly or when delta fails to initialize
+    full:
+      nice_level: 19
+      ionice_class: 3  # idle class
+      schedule: "monthly"  # First Sunday of month at 03:00
+      exclusions_same_as_delta: true
+
+# Desktop cleanup protection
+desktop:
+  # Files that should NEVER be archived (flagged by name)
+  # These files remain on Desktop indefinitely regardless of age
+  protected_files:
+    # Add specific filenames here (exact match only)
+    # Example: "important-document.pdf"
+    # Example: "work-in-progress"

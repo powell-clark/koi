@@ -1,0 +1,78 @@
+# ClamAV exclusion patterns for delta and full scans
+# Used by koi-clamav-delta.sh and monthly full-scan timer
+# Format: each line is a directory or pattern to exclude from scanning
+
+# Development dependencies (constantly changing, low risk)
+.nvm
+.pyenv
+.rbenv
+.cargo
+.rustup
+node_modules
+venv
+.venv
+__pycache__
+*.egg-info
+.mypy_cache
+.pytest_cache
+
+# Build and cache directories (regenerated on demand)
+.cache
+.ccache
+.gradle
+.maven
+target
+build
+dist
+*.o
+*.so
+*.a
+
+# Package managers and development tools
+.npm
+.pip
+.gem
+.composer
+.bundle
+vendor
+
+# IDE and editor caches
+.vscode
+.idea
+.sublime-project
+.sublime-workspace
+.atom
+.vim
+.emacs.d
+.neovim
+
+# Docker and virtualization
+.docker
+.dockerignore
+.vagrant
+.vm
+
+# Temporary and log files (already cleaned elsewhere)
+tmp
+temp
+*.log
+*.tmp
+*.lock
+
+# Trash and removed items
+.Trash
+.local/share/Trash
+.cache/Trash
+
+# System files (excluded from malware perspective)
+.DS_Store
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+.directory
+
+# Large media files (low malware risk, slow to scan)
+*.iso
+*.dmg
+*.tar.gz
+*.zip

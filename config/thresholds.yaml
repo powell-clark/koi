@@ -1,0 +1,75 @@
+# Koi Health Monitoring Thresholds
+
+disk:
+  # Alert when directory exceeds these sizes
+  cache_warning: 10GB
+  config_warning: 15GB
+  docker_warning: 10GB
+
+  # Alert when cache hasn't been accessed in N days
+  stale_cache_days: 30
+
+memory:
+  # Memory usage thresholds (percentage)
+  warning_percent: 70
+  critical_percent: 85
+  swap_warning_percent: 50
+
+  # PSI thresholds (percentage)
+  psi_warning: 10.0
+  psi_critical: 25.0
+
+  # systemd-oomd monitoring
+  oomd_threshold: 80
+
+docker:
+  # Alert for unused resources
+  unused_image_days: 60
+  unused_volume_days: 90
+  unused_container_days: 30
+
+packages:
+  # Alert when packages are outdated
+  npm_outdated_days: 30
+  pip_outdated_days: 30
+  system_outdated_days: 7
+
+git:
+  # Alert for uncommitted/unpushed changes
+  check_repos: true
+  ignore_paths:
+    - .claude
+    - node_modules
+    - .venv
+
+desktop:
+  # Desktop cleanup settings
+  dry_run: true  # Default to dry-run mode for safety
+  protected_files: []  # Files flagged by name to never archive (exact match)
+
+# Service cost budgets
+budgets:
+  # GitHub Actions (percentage of free tier: 2000 Linux-equivalent minutes)
+  github_warning_pct: 80     # Warn at 80% of free tier
+  github_critical_pct: 100   # Critical at 100% (will incur charges)
+
+  # Monthly spending limits (USD)
+  github_monthly_limit: 5.00
+  vercel_monthly_limit: 0.00  # Free tier only
+  api_monthly_limit: 50.00    # Claude/OpenAI APIs
+
+  # Per-service alerts
+  macos_minutes_warning: 50   # Warn if macOS minutes > 50 (costs $4)
+
+# Security monitoring
+security:
+  aide:
+    # Hours before AIDE cache is considered stale (bridge should run daily)
+    cache_stale_hours: 48
+    # Days before AIDE database is considered stale (needs aideinit)
+    db_stale_days: 7
+    # Extra false positive path patterns (regex, added to defaults)
+    false_positive_patterns: []
+
+  opensnitch:
+    # No config needed — reads from /etc/opensnitchd/ directly
