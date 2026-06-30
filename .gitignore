@@ -91,6 +91,9 @@ CONSCIOUSNESS/*.lock
 # Logs directory (session output)
 logs/
 
+# Local machine data — worklogs and incident logs are machine-specific, never public
+data/
+
 # Environment secrets
 .env
 .env.*
