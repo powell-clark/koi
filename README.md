@@ -1,8 +1,10 @@
 # Koi
 
-**A calm, honest housekeeper for your computer.** Koi is a small, always-on daemon
-that keeps your machine clean, organised, and healthy — continuously, and only ever
-with your consent. It runs in your system tray on Linux, macOS, and Windows.
+**A calm, honest housekeeper for your computer.** Koi is a small daemon-in-progress
+that aims to keep your machine clean, organised, and healthy — continuously, and only
+ever with your consent. It's early: the CLI and core monitors run today (Linux-first),
+the daemon and system tray app are mid-build, and macOS/Windows support is on the
+roadmap rather than shipped.
 
 [![CI](https://github.com/powell-clark/koi/actions/workflows/ci.yml/badge.svg)](https://github.com/powell-clark/koi/actions/workflows/ci.yml)
 [![secret-scan](https://github.com/powell-clark/koi/actions/workflows/secret-scan.yml/badge.svg)](https://github.com/powell-clark/koi/actions/workflows/secret-scan.yml)
@@ -74,10 +76,11 @@ configuration from `~/.config/koi`. It never writes into its own source tree.
 
 ## How it works
 
-Koi is a Rust workspace: a core library, a daemon (scheduled monitoring), a CLI, a Tauri
-v2 tray app, and a plugin host for user-defined rules. Metrics and filing decisions
-persist to local SQLite. The filing "learner" is a simple, inspectable classifier that
-counts your approvals and rejections — no external inference in the hot path.
+Koi is a Rust workspace: a core library, a CLI (working today), and an in-progress
+daemon, Tauri v2 tray app, and plugin host for user-defined rules. Metrics and filing
+decisions persist to local SQLite. The filing "learner" is a simple, inspectable
+classifier that counts your approvals and rejections — no external inference in the
+hot path.
 
 ## Open core — the optional paid cloud
 
