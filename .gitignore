@@ -94,6 +94,10 @@ logs/
 # Local machine data — worklogs and incident logs are machine-specific, never public
 data/
 
+# Saved session transcripts (from /consciousness:issue) — full conversation history,
+# never public
+chats/
+
 # Environment secrets
 .env
 .env.*
