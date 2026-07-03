@@ -92,10 +92,11 @@ never need it to use Koi.
 
 ## Disclaimer
 
-Koi touches your files, caches, and system configuration. It's software, it's early,
-and it can have bugs. Consent-gating and dry-run previews reduce risk but don't
-eliminate it — back up anything irreplaceable regardless. Provided "as is", without
-warranty of any kind; see [LICENSE](LICENSE) for the full terms. Use at your own risk.
+Koi is built to be safe by design — consent-gating, dry-run previews, and a
+conservative allow-list for anything it does on its own, all covered by tests in CI.
+That said, it touches your files and system configuration, and it's early software, so
+back up anything irreplaceable as you normally would. Provided "as is", without
+warranty of any kind; see [LICENSE](LICENSE) for the full terms.
 
 ## License
 
