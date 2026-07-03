@@ -90,6 +90,13 @@ organisation for a flat subscription. Any LLM-powered conveniences there are
 **bring-your-own-key, pass-through** — your key, your provider bill, never resold. You
 never need it to use Koi.
 
+## Disclaimer
+
+Koi touches your files, caches, and system configuration. It's software, it's early,
+and it can have bugs. Consent-gating and dry-run previews reduce risk but don't
+eliminate it — back up anything irreplaceable regardless. Provided "as is", without
+warranty of any kind; see [LICENSE](LICENSE) for the full terms. Use at your own risk.
+
 ## License
 
 [Functional Source License v1.1, Apache 2.0 future license](LICENSE) (FSL-1.1-Apache-2.0).
