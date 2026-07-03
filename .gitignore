@@ -109,3 +109,9 @@ target/
 # reproducible dependency set is wanted for CI builds and releases.
 # (Overrides the broad *.lock rule above.)
 !Cargo.lock
+
+# CLAUDE.md carries operational instructions (worklog conventions, autonomy
+# rules, machine-specific detail) — was previously untracked only via a
+# local .git/info/exclude entry, which doesn't travel with the repo on a
+# fresh clone. Tracked here instead so the exclusion is real everywhere.
+/CLAUDE.md
