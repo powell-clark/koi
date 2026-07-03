@@ -1959,6 +1959,7 @@ dependencies = [
  "clap",
  "clap_complete",
  "directories",
+ "glob",
  "koi-core",
  "rusqlite",
  "serde_json",

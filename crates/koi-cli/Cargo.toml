@@ -26,3 +26,4 @@ tracing-subscriber.workspace = true
 toml = "0.8"
 shellexpand = "3"
 walkdir.workspace = true
+glob = "0.3"
