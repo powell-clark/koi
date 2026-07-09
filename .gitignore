@@ -109,9 +109,8 @@ target/
 # These were previously untracked only via .git/info/exclude, which does not
 # travel with the repo: a fresh clone (the other machine, or anyone else) had
 # nothing stopping them from being added and pushed. Tracked here so the
-# exclusion holds everywhere. CLAUDE.md itself is a one-line @AGENTS.md
-# pointer and is safe to track.
-/AGENTS.md
+# exclusion holds everywhere. CLAUDE.md and AGENTS.md are tracked on purpose:
+# they carry rules only — machine-specific state lives in data/host.yaml.
 /CONSCIOUSNESS/
 /src/
 /pyproject.toml
