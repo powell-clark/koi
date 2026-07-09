@@ -830,6 +830,38 @@ fn human(bytes: u64) -> String {
     }
 }
 
+// An exclude pattern like "**/target/" or "**/.git/objects/" names one or
+// more trailing path components to match anywhere under a walked root
+// (leading "**/" and trailing "/" are structural, not literal glob text).
+// A path is excluded if that component sequence appears consecutively
+// anywhere in its components relative to the root.
+fn exclude_components(pattern: &str) -> Vec<glob::Pattern> {
+    let trimmed = pattern
+        .strip_prefix("**/")
+        .unwrap_or(pattern)
+        .trim_end_matches('/');
+    trimmed
+        .split('/')
+        .filter(|s| !s.is_empty())
+        .filter_map(|s| glob::Pattern::new(s).ok())
+        .collect()
+}
+
+fn is_excluded(rel_components: &[&std::ffi::OsStr], excludes: &[Vec<glob::Pattern>]) -> bool {
+    excludes.iter().any(|pat_seq| {
+        if pat_seq.is_empty() || pat_seq.len() > rel_components.len() {
+            return false;
+        }
+        (0..=rel_components.len() - pat_seq.len()).any(|start| {
+            pat_seq.iter().enumerate().all(|(i, pat)| {
+                rel_components[start + i]
+                    .to_str()
+                    .is_some_and(|c| pat.matches(c))
+            })
+        })
+    })
+}
+
 fn run_backup(dry_run: bool, include_red: bool) -> Result<()> {
     use std::path::PathBuf;
 
@@ -850,7 +882,11 @@ fn run_backup(dry_run: bool, include_red: bool) -> Result<()> {
     // Helper: collect every file under a configured root, attributing each to
     // the tier that listed it. Tier membership is taken from the config, never
     // inferred from directory names — no personal layout is baked in.
-    fn collect_tier(roots: &[PathBuf], to_upload: &mut Vec<(PathBuf, u64)>) -> (usize, u64) {
+    fn collect_tier(
+        roots: &[PathBuf],
+        excludes: &[Vec<glob::Pattern>],
+        to_upload: &mut Vec<(PathBuf, u64)>,
+    ) -> (usize, u64) {
         let mut count = 0usize;
         let mut bytes = 0u64;
         for path in roots {
@@ -866,6 +902,14 @@ fn run_backup(dry_run: bool, include_red: bool) -> Result<()> {
             } else if path.is_dir() {
                 for entry in walkdir::WalkDir::new(path)
                     .into_iter()
+                    .filter_entry(|e| {
+                        let rel: Vec<&std::ffi::OsStr> = e
+                            .path()
+                            .strip_prefix(path)
+                            .map(|r| r.components().map(|c| c.as_os_str()).collect())
+                            .unwrap_or_default();
+                        !is_excluded(&rel, excludes)
+                    })
                     .filter_map(|e| e.ok())
                 {
                     if entry.path().is_file() {
@@ -903,10 +947,23 @@ fn run_backup(dry_run: bool, include_red: bool) -> Result<()> {
         Vec::new()
     };
 
+    let amber_excludes: Vec<Vec<glob::Pattern>> = config
+        .get("amber_tier")
+        .and_then(|v| v.as_table())
+        .and_then(|t| t.get("exclude"))
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|item| item.as_str())
+                .map(exclude_components)
+                .collect()
+        })
+        .unwrap_or_default();
+
     // Collect files to upload, tracking each tier's count as we go.
     let mut to_upload: Vec<(PathBuf, u64)> = Vec::new();
-    let (amber_count, amber_bytes) = collect_tier(&amber_roots, &mut to_upload);
-    let (red_count, red_bytes) = collect_tier(&red_roots, &mut to_upload);
+    let (amber_count, amber_bytes) = collect_tier(&amber_roots, &amber_excludes, &mut to_upload);
+    let (red_count, red_bytes) = collect_tier(&red_roots, &[], &mut to_upload);
     let total_bytes = amber_bytes + red_bytes;
 
     if to_upload.is_empty() {
@@ -927,42 +984,87 @@ fn run_backup(dry_run: bool, include_red: bool) -> Result<()> {
         return Ok(());
     }
 
-    // Execute rclone sync. The source root is config/env-driven: KOI_BACKUP_SOURCE
-    // wins, otherwise the first configured amber-tier include is used. No personal
-    // directory layout is assumed here.
-    let sync_source = std::env::var_os("KOI_BACKUP_SOURCE")
-        .map(PathBuf::from)
-        .or_else(|| amber_roots.first().cloned());
-    let Some(sync_source) = sync_source else {
+    // Execute one rclone sync per configured root, each to its own
+    // destination subpath (roots share one remote, so they can't all sync
+    // to koi-crypt:/ directly — that would let the last root clobber the
+    // first). KOI_BACKUP_SOURCE, if set, overrides with a single ad-hoc
+    // root synced to the remote's top level.
+    let sync_roots: Vec<(PathBuf, String)> =
+        if let Some(src) = std::env::var_os("KOI_BACKUP_SOURCE") {
+            vec![(PathBuf::from(src), String::new())]
+        } else {
+            let mut roots: Vec<(PathBuf, String)> = amber_roots
+                .iter()
+                .map(|r| (r.clone(), rclone_dest_name(r)))
+                .collect();
+            if include_red {
+                roots.extend(red_roots.iter().map(|r| (r.clone(), rclone_dest_name(r))));
+            }
+            roots
+        };
+    if sync_roots.is_empty() {
         anyhow::bail!(
             "No backup source: set KOI_BACKUP_SOURCE or add an amber_tier.include entry to backup.toml"
         );
-    };
-    println!("\nStarting rclone sync to koi-crypt:/...");
-    let command = std::process::Command::new("rclone")
-        .args([
-            "sync",
-            "--verbose",
-            "--progress",
-            sync_source.to_str().unwrap_or("."),
-            "koi-crypt:/",
-        ])
-        .output();
+    }
 
-    match command {
-        Ok(output) => {
-            if output.status.success() {
-                println!("✓ Backup completed successfully.");
-                println!("\nSynced: {}", human(total_bytes));
-                Ok(())
-            } else {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                anyhow::bail!("rclone sync failed:\n{}", stderr)
-            }
+    let exclude_args: Vec<String> = config
+        .get("amber_tier")
+        .and_then(|v| v.as_table())
+        .and_then(|t| t.get("exclude"))
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|item| item.as_str())
+                .map(rclone_exclude_arg)
+                .collect()
+        })
+        .unwrap_or_default();
+
+    for (root, dest_name) in &sync_roots {
+        let dest = format!("koi-crypt:/{dest_name}");
+        println!("\nStarting rclone sync {} -> {dest}...", root.display());
+        let mut args: Vec<String> = vec!["sync".into(), "--verbose".into(), "--progress".into()];
+        for pattern in &exclude_args {
+            args.push("--exclude".into());
+            args.push(pattern.clone());
         }
-        Err(e) => {
-            anyhow::bail!("Failed to run rclone: {}", e)
+        args.push(root.to_str().unwrap_or(".").to_string());
+        args.push(dest);
+
+        let output = std::process::Command::new("rclone")
+            .args(&args)
+            .output()
+            .with_context(|| format!("Failed to run rclone for {}", root.display()))?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            anyhow::bail!("rclone sync failed for {}:\n{}", root.display(), stderr);
         }
+    }
+
+    println!("\n✓ Backup completed successfully.");
+    println!("Synced: {}", human(total_bytes));
+    Ok(())
+}
+
+// Destination subpath under koi-crypt:/ for a given source root. Uses the
+// root's final path component (e.g. ~/projects -> "projects") so distinct
+// roots land in distinct remote locations instead of overwriting each other.
+fn rclone_dest_name(root: &std::path::Path) -> String {
+    root.file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("backup")
+        .to_string()
+}
+
+// Convert a backup.toml exclude pattern ("**/target/", "**/.env") into an
+// rclone filter pattern. A directory pattern (trailing "/") becomes
+// "**/name/**" so rclone excludes everything beneath it; a file pattern
+// passes through unchanged.
+fn rclone_exclude_arg(pattern: &str) -> String {
+    match pattern.strip_suffix('/') {
+        Some(dir) => format!("{dir}/**"),
+        None => pattern.to_string(),
     }
 }
 
@@ -1545,5 +1647,98 @@ mod audit_parse_tests {
         // Function looks for "lynis" then next token as version
         let v = parse_lynis_version(output);
         assert!(v.is_some(), "expected version to be found");
+    }
+}
+
+#[cfg(test)]
+mod backup_exclude_tests {
+    use super::*;
+    use std::ffi::OsStr;
+
+    fn components(path: &str) -> Vec<&OsStr> {
+        std::path::Path::new(path)
+            .components()
+            .map(|c| c.as_os_str())
+            .collect()
+    }
+
+    #[test]
+    fn single_component_exclude_matches_at_any_depth() {
+        let excludes = vec![exclude_components("**/target/")];
+        assert!(is_excluded(
+            &components("myrepo/target/debug/build"),
+            &excludes
+        ));
+        assert!(!is_excluded(
+            &components("myrepo/src/target_notes.rs"),
+            &excludes
+        ));
+    }
+
+    #[test]
+    fn multi_component_exclude_requires_consecutive_match() {
+        let excludes = vec![exclude_components("**/.git/objects/")];
+        assert!(is_excluded(
+            &components(".git/objects/ab/cd1234"),
+            &excludes
+        ));
+        assert!(!is_excluded(&components(".git/refs/heads/main"), &excludes));
+    }
+
+    #[test]
+    fn file_level_exclude_matches_exact_name() {
+        let excludes = vec![exclude_components("**/.env")];
+        assert!(is_excluded(&components("myapp/.env"), &excludes));
+        assert!(!is_excluded(&components("myapp/.env.example"), &excludes));
+    }
+
+    #[test]
+    fn no_excludes_matches_nothing() {
+        assert!(!is_excluded(&components("myrepo/src/main.rs"), &[]));
+    }
+
+    #[test]
+    fn unrelated_dirs_stay_included() {
+        let excludes = vec![
+            exclude_components("**/target/"),
+            exclude_components("**/node_modules/"),
+            exclude_components("**/.cache/"),
+            exclude_components("**/venv/"),
+        ];
+        assert!(!is_excluded(&components("myrepo/src/lib.rs"), &excludes));
+        assert!(is_excluded(
+            &components("web/node_modules/pkg/index.js"),
+            &excludes
+        ));
+    }
+
+    #[test]
+    fn rclone_dest_name_uses_final_component() {
+        assert_eq!(
+            rclone_dest_name(std::path::Path::new("/home/x/projects")),
+            "projects"
+        );
+        assert_eq!(
+            rclone_dest_name(std::path::Path::new("/home/x/Documents/Personal")),
+            "Personal"
+        );
+    }
+
+    #[test]
+    fn rclone_dest_names_differ_for_distinct_roots() {
+        let a = rclone_dest_name(std::path::Path::new("/home/x/projects"));
+        let b = rclone_dest_name(std::path::Path::new("/home/x/Documents/Personal"));
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn rclone_exclude_arg_converts_directory_pattern() {
+        assert_eq!(rclone_exclude_arg("**/target/"), "**/target/**");
+        assert_eq!(rclone_exclude_arg("**/node_modules/"), "**/node_modules/**");
+    }
+
+    #[test]
+    fn rclone_exclude_arg_passes_through_file_pattern() {
+        assert_eq!(rclone_exclude_arg("**/.env"), "**/.env");
     }
 }
