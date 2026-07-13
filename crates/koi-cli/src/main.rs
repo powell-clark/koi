@@ -761,14 +761,31 @@ fn run_clean(dry_run: bool) -> Result<()> {
     let plan = cleaners::plan(&home);
 
     let mut total_bytes: u64 = 0;
-    let mut to_clean: Vec<_> = plan
+    let existing: Vec<_> = plan
         .into_iter()
         .filter(|(_, _, existed, _)| *existed)
         .collect();
+
+    // Exclude anything a running process still has open — the check that
+    // made removing a 7.3GB unreferenced HuggingFace cache safe rather than
+    // hopeful (WORK-KOI041). Named explicitly rather than silently skipped.
+    let mut to_clean: Vec<_> = Vec::new();
+    for entry in existing {
+        if cleaners::path_has_live_reference(&entry.1) {
+            println!(
+                "  skipped: {} — a running process still has {} open",
+                entry.0.name,
+                entry.1.display()
+            );
+        } else {
+            to_clean.push(entry);
+        }
+    }
     to_clean.sort_by(|a, b| b.3.cmp(&a.3));
 
     if to_clean.is_empty() {
         println!("Nothing to clean — all safe cache targets are already absent.");
+        print_clean_proposals();
         return Ok(());
     }
 
@@ -792,6 +809,7 @@ fn run_clean(dry_run: bool) -> Result<()> {
 
     if dry_run {
         println!("\nRe-run without --dry-run to apply.");
+        print_clean_proposals();
         return Ok(());
     }
 
@@ -813,7 +831,27 @@ fn run_clean(dry_run: bool) -> Result<()> {
     if !failed.is_empty() {
         println!("Failures: {}", failed.len());
     }
+
+    print_clean_proposals();
     Ok(())
+}
+
+/// Propose-only cleanup candidates — printed alongside `koi clean`'s
+/// auto-executed section but NEVER acted on here. Snap revisions need root;
+/// docker volumes can hold real data; both are the propose-and-wait tier.
+fn print_clean_proposals() {
+    let mut proposals = cleaners::docker_dangling_volume_proposals();
+    proposals.extend(cleaners::snap_disabled_revision_proposals());
+
+    if proposals.is_empty() {
+        return;
+    }
+
+    println!("\nProposals (review before acting — not auto-executed):");
+    for p in &proposals {
+        println!("  [{}] {}", p.kind, p.description);
+        println!("      {}", p.command_hint);
+    }
 }
 
 fn human(bytes: u64) -> String {
