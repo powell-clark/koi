@@ -8,8 +8,9 @@ use koi_core::{
         Outcome, ProposalId, ProposedAction, ScanContext, SqliteClassifier,
     },
     monitors::{
-        CacheMonitor, DiskMonitor, DockerMonitor, GhosttyMonitor, GitMonitor, LatencyMonitor,
-        MemoryMonitor, ModelSizeMonitor, NetworkMonitor, PackageMonitor, WezTermMonitor,
+        BackupMonitor, CacheMonitor, DiskMonitor, DockerMonitor, GhosttyMonitor, GitMonitor,
+        LatencyMonitor, MemoryMonitor, ModelSizeMonitor, NetworkMonitor, PackageMonitor,
+        WezTermMonitor,
     },
     notes, state,
     types::HealthStatus,
@@ -1174,6 +1175,7 @@ fn run_report(output: Option<std::path::PathBuf>) -> Result<()> {
     let conn = open_state()?;
     let monitors = [
         "DiskMonitor",
+        "BackupMonitor",
         "MemoryMonitor",
         "ModelSizeMonitor",
         "CacheMonitor",
@@ -1581,6 +1583,7 @@ fn run_reject(id_prefix: &str) -> Result<()> {
 fn run_check(json: bool) -> Result<()> {
     let monitors: Vec<Box<dyn Monitor>> = vec![
         Box::new(DiskMonitor::new().context("DiskMonitor init")?),
+        Box::new(BackupMonitor::new()),
         Box::new(MemoryMonitor::new()),
         Box::new(ModelSizeMonitor::new()),
         Box::new(CacheMonitor::new().context("CacheMonitor init")?),

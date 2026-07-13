@@ -1,5 +1,6 @@
 //! Concrete monitors. Each implements [`crate::Monitor`].
 
+pub mod backup;
 pub mod cache;
 pub mod disk;
 pub mod docker;
@@ -14,6 +15,7 @@ pub mod package;
 pub mod wezterm;
 pub mod wezterm_crash;
 
+pub use backup::BackupMonitor;
 pub use cache::CacheMonitor;
 pub use disk::DiskMonitor;
 pub use docker::DockerMonitor;
