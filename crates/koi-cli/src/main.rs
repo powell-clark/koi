@@ -9,7 +9,7 @@ use koi_core::{
     },
     monitors::{
         CacheMonitor, DiskMonitor, DockerMonitor, GhosttyMonitor, GitMonitor, LatencyMonitor,
-        MemoryMonitor, NetworkMonitor, PackageMonitor, WezTermMonitor,
+        MemoryMonitor, ModelSizeMonitor, NetworkMonitor, PackageMonitor, WezTermMonitor,
     },
     notes, state,
     types::HealthStatus,
@@ -1137,6 +1137,7 @@ fn run_report(output: Option<std::path::PathBuf>) -> Result<()> {
     let monitors = [
         "DiskMonitor",
         "MemoryMonitor",
+        "ModelSizeMonitor",
         "CacheMonitor",
         "DockerMonitor",
         "GitMonitor",
@@ -1543,6 +1544,7 @@ fn run_check(json: bool) -> Result<()> {
     let monitors: Vec<Box<dyn Monitor>> = vec![
         Box::new(DiskMonitor::new().context("DiskMonitor init")?),
         Box::new(MemoryMonitor::new()),
+        Box::new(ModelSizeMonitor::new()),
         Box::new(CacheMonitor::new().context("CacheMonitor init")?),
         Box::new(DockerMonitor::new()),
         Box::new(GitMonitor::new().context("GitMonitor init")?),
