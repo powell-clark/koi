@@ -6,6 +6,7 @@
 pub mod cleaners;
 pub mod error;
 pub mod filing;
+pub mod fs_size;
 pub mod monitor;
 pub mod monitors;
 pub mod notes;
