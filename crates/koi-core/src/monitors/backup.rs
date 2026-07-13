@@ -14,6 +14,47 @@ use crate::{
 
 const STALE_AFTER_HOURS: i64 = 8 * 24;
 
+/// Derived state of the encrypted backup, from the systemd unit's reported
+/// `ActiveState`/`Result` and the age of the last successful exit.
+///
+/// The key distinction (TASK-KOI192): a `signal` result means the long-running
+/// sync was cut short by a reboot or shutdown — this workstation reboots
+/// several times a day and a full crypt sync takes far longer than one uptime
+/// window — so it is an *interrupted* run that resumes on the next boot, not a
+/// failure of the backup command. Whether the data has actually converged on
+/// the remote is measured separately by the convergence check in `koi backup`.
+#[derive(Debug, PartialEq, Eq)]
+enum BackupState {
+    Running,
+    Interrupted,
+    Failed,
+    Stale,
+    Healthy,
+    NeverRan,
+}
+
+fn classify_backup(
+    active_state: &str,
+    result: &str,
+    last_success_age_hours: Option<i64>,
+) -> BackupState {
+    if matches!(active_state, "active" | "activating") {
+        BackupState::Running
+    } else if result == "signal" {
+        BackupState::Interrupted
+    } else if !result.is_empty() && result != "success" {
+        BackupState::Failed
+    } else if let Some(age_hours) = last_success_age_hours {
+        if age_hours >= STALE_AFTER_HOURS {
+            BackupState::Stale
+        } else {
+            BackupState::Healthy
+        }
+    } else {
+        BackupState::NeverRan
+    }
+}
+
 pub struct BackupMonitor;
 
 impl Default for BackupMonitor {
@@ -47,6 +88,8 @@ impl Monitor for BackupMonitor {
         let exit_timestamp = properties
             .get("ExecMainExitTimestamp")
             .and_then(|value| parse_systemd_timestamp(value));
+        let last_success_age_hours =
+            exit_timestamp.map(|ts| (Local::now().naive_local() - ts).num_hours().max(0));
         let mut observations = vec![Observation {
             key: "service_state".into(),
             value: serde_json::json!({
@@ -57,36 +100,49 @@ impl Monitor for BackupMonitor {
             severity: Severity::Info,
         }];
 
-        let (status, suggestion) = if matches!(active_state, "active" | "activating") {
-            observations.push(Observation {
-                key: "backup_running".into(),
-                value: serde_json::json!(true),
-                severity: Severity::Info,
-            });
-            (HealthStatus::Healthy, None)
-        } else if !result.is_empty() && result != "success" {
-            (
+        let (status, suggestion) = match classify_backup(
+            active_state,
+            result,
+            last_success_age_hours,
+        ) {
+            BackupState::Running => {
+                observations.push(Observation {
+                    key: "backup_running".into(),
+                    value: serde_json::json!(true),
+                    severity: Severity::Info,
+                });
+                (HealthStatus::Healthy, None)
+            }
+            BackupState::Interrupted => {
+                observations.push(Observation {
+                    key: "backup_interrupted".into(),
+                    value: serde_json::json!({ "result": result }),
+                    severity: Severity::Warning,
+                });
+                (
+                    HealthStatus::Warning,
+                    Some(Suggestion {
+                        message: "Encrypted backup was interrupted before completing (likely a reboot mid-sync) — it will resume on the next run".into(),
+                        severity: Severity::Warning,
+                        action_hint: Some("journalctl --user -u koi-backup.service".into()),
+                    }),
+                )
+            }
+            BackupState::Failed => (
                 HealthStatus::Critical,
                 Some(Suggestion {
                     message: format!("Encrypted backup service failed ({result})"),
                     severity: Severity::Critical,
                     action_hint: Some("journalctl --user -u koi-backup.service".into()),
                 }),
-            )
-        } else if let Some(exit_timestamp) = exit_timestamp {
-            let age_hours = (Local::now().naive_local() - exit_timestamp)
-                .num_hours()
-                .max(0);
-            observations.push(Observation {
-                key: "last_success_age_hours".into(),
-                value: serde_json::json!(age_hours),
-                severity: if age_hours >= STALE_AFTER_HOURS {
-                    Severity::Warning
-                } else {
-                    Severity::Info
-                },
-            });
-            if age_hours >= STALE_AFTER_HOURS {
+            ),
+            BackupState::Stale => {
+                let age_hours = last_success_age_hours.unwrap_or_default();
+                observations.push(Observation {
+                    key: "last_success_age_hours".into(),
+                    value: serde_json::json!(age_hours),
+                    severity: Severity::Warning,
+                });
                 (
                     HealthStatus::Warning,
                     Some(Suggestion {
@@ -97,18 +153,23 @@ impl Monitor for BackupMonitor {
                         action_hint: Some("systemctl --user start koi-backup.service".into()),
                     }),
                 )
-            } else {
+            }
+            BackupState::Healthy => {
+                observations.push(Observation {
+                    key: "last_success_age_hours".into(),
+                    value: serde_json::json!(last_success_age_hours.unwrap_or_default()),
+                    severity: Severity::Info,
+                });
                 (HealthStatus::Healthy, None)
             }
-        } else {
-            (
+            BackupState::NeverRan => (
                 HealthStatus::Warning,
                 Some(Suggestion {
                     message: "Encrypted backup has no completed run recorded".into(),
                     severity: Severity::Warning,
                     action_hint: Some("systemctl --user start koi-backup.service".into()),
                 }),
-            )
+            ),
         };
 
         Ok(MonitorReport {
@@ -184,5 +245,53 @@ mod tests {
     fn rejects_empty_or_malformed_timestamp() {
         assert!(parse_systemd_timestamp("").is_none());
         assert!(parse_systemd_timestamp("not a timestamp").is_none());
+    }
+
+    #[test]
+    fn running_states_report_running() {
+        assert_eq!(classify_backup("active", "", None), BackupState::Running);
+        assert_eq!(
+            classify_backup("activating", "signal", None),
+            BackupState::Running
+        );
+    }
+
+    #[test]
+    fn signal_kill_is_interrupted_not_failed() {
+        // Reboot/shutdown SIGTERM (or SIGKILL) mid-sync — the dominant case on
+        // this frequently-rebooted workstation. Must not read as Critical.
+        assert_eq!(
+            classify_backup("failed", "signal", None),
+            BackupState::Interrupted
+        );
+    }
+
+    #[test]
+    fn genuine_non_success_results_are_failed() {
+        assert_eq!(
+            classify_backup("failed", "exit-code", None),
+            BackupState::Failed
+        );
+        assert_eq!(
+            classify_backup("failed", "oom-kill", None),
+            BackupState::Failed
+        );
+    }
+
+    #[test]
+    fn success_age_drives_healthy_vs_stale() {
+        assert_eq!(
+            classify_backup("inactive", "success", Some(1)),
+            BackupState::Healthy
+        );
+        assert_eq!(
+            classify_backup("inactive", "success", Some(STALE_AFTER_HOURS)),
+            BackupState::Stale
+        );
+    }
+
+    #[test]
+    fn no_recorded_run_is_never_ran() {
+        assert_eq!(classify_backup("inactive", "", None), BackupState::NeverRan);
     }
 }
