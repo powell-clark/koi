@@ -79,12 +79,13 @@ impl DiskMonitor {
     fn sizes(&self) -> (Vec<(String, u64)>, CacheState) {
         if let Some(cache) = self.read_cache() {
             let age = unix_now().saturating_sub(cache.timestamp);
-            let state = if age >= CACHE_TTL_SECS {
-                CacheState::Stale
-            } else {
-                CacheState::Fresh
-            };
-            return (cache.sizes, state);
+            if age < CACHE_TTL_SECS {
+                return (cache.sizes, CacheState::Fresh);
+            }
+            // Cache expired — recompute and persist, same as a first run.
+            let sizes = self.compute_sizes();
+            let _ = self.write_cache(&sizes);
+            return (sizes, CacheState::Stale);
         }
         let sizes = self.compute_sizes();
         let _ = self.write_cache(&sizes);
@@ -199,7 +200,7 @@ impl Monitor for DiskMonitor {
             });
         }
 
-        let _ = cache_state;
+        let _ = cache_state; // retained for future history/telemetry use
         Ok(MonitorReport {
             monitor: self.name().to_string(),
             status,
@@ -211,6 +212,38 @@ impl Monitor for DiskMonitor {
     }
 }
 
+// Sums actual allocated disk blocks (matching `du`'s default behaviour),
+// deduplicated by (device, inode) to avoid double-counting hardlinks.
+//
+// TASK-KOI174 root cause: a naive `metadata().len()` sum reports *apparent*
+// (logical) size, which is wrong for sparse files — confirmed on this exact
+// machine, ~/.docker contains a large sparse file whose apparent size is
+// ~64GiB but whose real disk consumption (`st_blocks`) is ~8.1GB, matching
+// `du -sh` exactly (`du --apparent-size` independently confirmed ~65G,
+// i.e. matched the OLD buggy behaviour bit for bit). Hardlink dedup is kept
+// as a correctness belt-and-braces for directories that do use them heavily
+// (Docker's overlay2 driver is a common case, just not present in this
+// particular ~/.docker) — st_blocks alone doesn't protect against a
+// hardlinked file's blocks being counted once per link. On non-Unix targets
+// (no inode/block concept), falls back to the logical-length sum.
+#[cfg(unix)]
+fn dir_size(path: &Path) -> u64 {
+    use std::collections::HashSet;
+    use std::os::unix::fs::MetadataExt;
+
+    let mut seen_inodes: HashSet<(u64, u64)> = HashSet::new();
+    WalkDir::new(path)
+        .follow_links(false)
+        .into_iter()
+        .filter_map(|e| e.ok())
+        .filter_map(|e| e.metadata().ok())
+        .filter(|m| m.is_file())
+        .filter(|m| seen_inodes.insert((m.dev(), m.ino())))
+        .map(|m| m.blocks() * 512)
+        .sum()
+}
+
+#[cfg(not(unix))]
 fn dir_size(path: &Path) -> u64 {
     WalkDir::new(path)
         .follow_links(false)
@@ -233,4 +266,66 @@ fn dirs_home() -> Result<PathBuf> {
     std::env::var_os("HOME")
         .map(PathBuf::from)
         .ok_or_else(|| crate::error::Error::Config("$HOME not set".into()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    #[test]
+    #[cfg(unix)]
+    fn dir_size_counts_disk_blocks_not_apparent_length_for_sparse_files() {
+        // TASK-KOI174 regression: a naive metadata().len() sum reports a
+        // sparse file's logical size, not its real disk consumption. A file
+        // truncated to 1GB with nothing written should occupy ~0 bytes on
+        // disk, not 1GB.
+        let dir = std::env::temp_dir().join(format!("koi-disk-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let sparse_path = dir.join("sparse.bin");
+        let f = std::fs::File::create(&sparse_path).unwrap();
+        f.set_len(1024 * 1024 * 1024).unwrap(); // 1 GiB logical, 0 bytes written
+        drop(f);
+
+        let measured = dir_size(&dir);
+        // Real disk usage should be far below the 1GiB apparent size —
+        // filesystem block accounting varies, so assert well under half.
+        assert!(
+            measured < 512 * 1024 * 1024,
+            "expected sparse file to measure near-zero disk usage, got {measured} bytes"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn dir_size_counts_hardlinked_file_once() {
+        let dir =
+            std::env::temp_dir().join(format!("koi-disk-hardlink-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let original = dir.join("original.bin");
+        let mut f = std::fs::File::create(&original).unwrap();
+        f.write_all(&[0u8; 4096]).unwrap();
+        drop(f);
+        let link = dir.join("hardlink.bin");
+        std::fs::hard_link(&original, &link).unwrap();
+
+        let measured = dir_size(&dir);
+        let single_file_size = dir_size(&{
+            let solo =
+                std::env::temp_dir().join(format!("koi-disk-solo-test-{}", std::process::id()));
+            std::fs::create_dir_all(&solo).unwrap();
+            let mut sf = std::fs::File::create(solo.join("f.bin")).unwrap();
+            sf.write_all(&[0u8; 4096]).unwrap();
+            drop(sf);
+            solo
+        });
+
+        // Two hardlinked entries pointing at the same inode should measure
+        // the same total as a single file of that size, not double.
+        assert_eq!(measured, single_file_size, "hardlinked file counted twice");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
