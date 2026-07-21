@@ -128,3 +128,4 @@ target/
 /docs/BUSINESS-PLAN.md
 /config/*.dconf
 /config/*.service
+.aider*
