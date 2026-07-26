@@ -43,7 +43,12 @@ pub fn dir_size(path: &Path) -> u64 {
 
 #[cfg(test)]
 mod tests {
+    // Every test below is `cfg(unix)` — sparse files and hard links have no
+    // portable equivalent. Gate the imports to match, or they read as unused
+    // on Windows and `clippy -D warnings` fails the build there.
+    #[cfg(unix)]
     use super::*;
+    #[cfg(unix)]
     use std::io::Write;
 
     #[test]

@@ -236,6 +236,9 @@ pub fn docker_dangling_volume_proposals() -> Vec<CleanProposal> {
 
 #[cfg(test)]
 mod tests {
+    // Both tests below are Linux-only — reference detection reads /proc.
+    // Gate the import to match so it is not flagged unused on other platforms.
+    #[cfg(target_os = "linux")]
     use super::*;
 
     #[test]
