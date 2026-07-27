@@ -917,17 +917,36 @@ fn is_excluded(rel_components: &[&std::ffi::OsStr], excludes: &[Vec<glob::Patter
 fn measure_convergence(
     local_bytes: u64,
 ) -> Result<koi_core::backup_convergence::ConvergenceSnapshot> {
-    use koi_core::backup_convergence::{parse_rclone_size_bytes, ConvergenceSnapshot};
+    use koi_core::backup_convergence::{
+        is_rate_limited, parse_rclone_size_bytes, ConvergenceSnapshot,
+    };
 
+    // --tpslimit paces the listing so it does not exhaust the remote's API
+    // quota. The common case is measuring *while* a sync is in flight, and both
+    // processes draw on the same Google Drive quota — unpaced, the size query
+    // rate-limits itself out (observed 2026-07-27, TASK-KOI192).
     let output = std::process::Command::new("rclone")
-        .args(["size", "koi-crypt:/", "--json"])
+        .args([
+            "size",
+            "koi-crypt:/",
+            "--json",
+            "--tpslimit",
+            "4",
+            "--retries",
+            "3",
+        ])
         .output()
         .context("Failed to run rclone size — is rclone installed and koi-crypt configured?")?;
     if !output.status.success() {
-        anyhow::bail!(
-            "rclone size failed:\n{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if is_rate_limited(&stderr) {
+            anyhow::bail!(
+                "Remote is rate-limiting the size query — this usually means a backup sync is \
+                 already running and both are drawing on the same Google Drive quota. \
+                 Convergence is unchanged; re-measure once the sync is idle."
+            );
+        }
+        anyhow::bail!("rclone size failed:\n{stderr}");
     }
     let remote_bytes = parse_rclone_size_bytes(&String::from_utf8_lossy(&output.stdout))
         .context("Could not read byte total from rclone size --json")?;

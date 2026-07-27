@@ -119,6 +119,21 @@ pub fn parse_rclone_size_bytes(stdout: &str) -> Result<u64> {
         })
 }
 
+/// Did `rclone` fail because the remote's API quota was exhausted rather than
+/// because anything is actually wrong?
+///
+/// Measuring convergence contends with an in-flight sync for the same Google
+/// Drive quota, so this is the expected failure when the backup is running —
+/// observed live on 2026-07-27. It is a "come back later", not a fault, and
+/// must not be reported to the operator as a broken backup.
+pub fn is_rate_limited(stderr: &str) -> bool {
+    let stderr = stderr.to_ascii_lowercase();
+    stderr.contains("ratelimitexceeded")
+        || stderr.contains("rate_limit_exceeded")
+        || stderr.contains("userratelimitexceeded")
+        || stderr.contains("too many requests")
+}
+
 pub fn snapshot_path() -> Result<PathBuf> {
     Ok(default_data_dir()?.join("backup-convergence.json"))
 }
@@ -234,6 +249,24 @@ mod tests {
             parse_rclone_size_bytes("{\"count\":1,\"bytes\":42}\n").unwrap(),
             42
         );
+    }
+
+    #[test]
+    fn recognises_drive_quota_exhaustion() {
+        // Real stderr shape observed 2026-07-27, measuring while a sync was in
+        // flight: the two rclone processes shared one Drive quota.
+        let observed = r#""reason": "RATE_LIMIT_EXCEEDED"
+        , rateLimitExceeded"#;
+        assert!(is_rate_limited(observed));
+        assert!(is_rate_limited("Error 403: userRateLimitExceeded"));
+        assert!(is_rate_limited("429 Too Many Requests"));
+    }
+
+    #[test]
+    fn genuine_failures_are_not_mistaken_for_rate_limiting() {
+        assert!(!is_rate_limited("directory not found"));
+        assert!(!is_rate_limited("couldn't connect: no such host"));
+        assert!(!is_rate_limited(""));
     }
 
     #[test]
