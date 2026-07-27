@@ -1142,7 +1142,23 @@ fn run_backup(dry_run: bool, include_red: bool, status: bool) -> Result<()> {
     for (root, dest_name) in &sync_roots {
         let dest = format!("koi-crypt:/{dest_name}");
         println!("\nStarting rclone sync {} -> {dest}...", root.display());
-        let mut args: Vec<String> = vec!["sync".into(), "--verbose".into(), "--progress".into()];
+        // --fast-list fetches the remote tree in far fewer API round-trips
+        // instead of walking it directory by directory. That re-walk is the
+        // dominant restart cost here: a reboot kills the sync every few hours
+        // and the next run re-checks the whole tree from cold (TASK-KOI192).
+        //
+        // The trade is memory — rclone holds the full listing in RAM, roughly
+        // 1KB per object, so a few hundred MB at this tree size. Enabled on the
+        // operator's explicit decision (2026-07-27) with the OOM history on this
+        // host understood (INC-KOI009, INC-KOI013, INC-KOI016). If a backup run
+        // is ever implicated in another OOM event, dropping this one flag is the
+        // first thing to try.
+        let mut args: Vec<String> = vec![
+            "sync".into(),
+            "--verbose".into(),
+            "--progress".into(),
+            "--fast-list".into(),
+        ];
         for pattern in &exclude_args {
             args.push("--exclude".into());
             args.push(pattern.clone());
