@@ -9,12 +9,12 @@ use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::{
     fs,
-    path::{Path, PathBuf},
+    path::PathBuf,
     time::{SystemTime, UNIX_EPOCH},
 };
-use walkdir::WalkDir;
 
 use crate::{
+    fs_size::dir_size,
     monitor::Monitor,
     types::{HealthStatus, MonitorReport, Observation, Severity, Suggestion},
     Result,
@@ -79,12 +79,13 @@ impl DiskMonitor {
     fn sizes(&self) -> (Vec<(String, u64)>, CacheState) {
         if let Some(cache) = self.read_cache() {
             let age = unix_now().saturating_sub(cache.timestamp);
-            let state = if age >= CACHE_TTL_SECS {
-                CacheState::Stale
-            } else {
-                CacheState::Fresh
-            };
-            return (cache.sizes, state);
+            if age < CACHE_TTL_SECS {
+                return (cache.sizes, CacheState::Fresh);
+            }
+            // Cache expired — recompute and persist, same as a first run.
+            let sizes = self.compute_sizes();
+            let _ = self.write_cache(&sizes);
+            return (sizes, CacheState::Stale);
         }
         let sizes = self.compute_sizes();
         let _ = self.write_cache(&sizes);
@@ -199,7 +200,7 @@ impl Monitor for DiskMonitor {
             });
         }
 
-        let _ = cache_state;
+        let _ = cache_state; // retained for future history/telemetry use
         Ok(MonitorReport {
             monitor: self.name().to_string(),
             status,
@@ -209,17 +210,6 @@ impl Monitor for DiskMonitor {
             suggestions,
         })
     }
-}
-
-fn dir_size(path: &Path) -> u64 {
-    WalkDir::new(path)
-        .follow_links(false)
-        .into_iter()
-        .filter_map(|e| e.ok())
-        .filter_map(|e| e.metadata().ok())
-        .filter(|m| m.is_file())
-        .map(|m| m.len())
-        .sum()
 }
 
 fn unix_now() -> u64 {

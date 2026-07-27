@@ -8,8 +8,9 @@ use koi_core::{
         Outcome, ProposalId, ProposedAction, ScanContext, SqliteClassifier,
     },
     monitors::{
-        CacheMonitor, DiskMonitor, DockerMonitor, GhosttyMonitor, GitMonitor, LatencyMonitor,
-        MemoryMonitor, NetworkMonitor, PackageMonitor, WezTermMonitor,
+        BackupMonitor, CacheMonitor, DiskMonitor, DockerMonitor, GhosttyMonitor, GitMonitor,
+        LatencyMonitor, MemoryMonitor, ModelSizeMonitor, NetworkMonitor, PackageMonitor,
+        WezTermMonitor,
     },
     notes, state,
     types::HealthStatus,
@@ -54,6 +55,10 @@ enum Command {
         /// Include red-tier sensitive data (secrets, keys). Requires explicit confirmation.
         #[arg(long)]
         include_red: bool,
+        /// Measure how far the encrypted remote has converged on the local
+        /// source and persist the result for `koi check`. Syncs nothing.
+        #[arg(long)]
+        status: bool,
     },
     /// Start continuous health monitoring.
     Monitor,
@@ -174,7 +179,8 @@ fn main() -> Result<()> {
         Command::Backup {
             dry_run,
             include_red,
-        } => run_backup(dry_run, include_red)?,
+            status,
+        } => run_backup(dry_run, include_red, status)?,
         Command::Monitor => run_monitor()?,
         Command::Scan { json } => run_scan(json)?,
         Command::Proposals => run_proposals()?,
@@ -761,14 +767,31 @@ fn run_clean(dry_run: bool) -> Result<()> {
     let plan = cleaners::plan(&home);
 
     let mut total_bytes: u64 = 0;
-    let mut to_clean: Vec<_> = plan
+    let existing: Vec<_> = plan
         .into_iter()
         .filter(|(_, _, existed, _)| *existed)
         .collect();
+
+    // Exclude anything a running process still has open — the check that
+    // made removing a 7.3GB unreferenced HuggingFace cache safe rather than
+    // hopeful (WORK-KOI041). Named explicitly rather than silently skipped.
+    let mut to_clean: Vec<_> = Vec::new();
+    for entry in existing {
+        if cleaners::path_has_live_reference(&entry.1) {
+            println!(
+                "  skipped: {} — a running process still has {} open",
+                entry.0.name,
+                entry.1.display()
+            );
+        } else {
+            to_clean.push(entry);
+        }
+    }
     to_clean.sort_by(|a, b| b.3.cmp(&a.3));
 
     if to_clean.is_empty() {
         println!("Nothing to clean — all safe cache targets are already absent.");
+        print_clean_proposals();
         return Ok(());
     }
 
@@ -792,6 +815,7 @@ fn run_clean(dry_run: bool) -> Result<()> {
 
     if dry_run {
         println!("\nRe-run without --dry-run to apply.");
+        print_clean_proposals();
         return Ok(());
     }
 
@@ -813,7 +837,27 @@ fn run_clean(dry_run: bool) -> Result<()> {
     if !failed.is_empty() {
         println!("Failures: {}", failed.len());
     }
+
+    print_clean_proposals();
     Ok(())
+}
+
+/// Propose-only cleanup candidates — printed alongside `koi clean`'s
+/// auto-executed section but NEVER acted on here. Snap revisions need root;
+/// docker volumes can hold real data; both are the propose-and-wait tier.
+fn print_clean_proposals() {
+    let mut proposals = cleaners::docker_dangling_volume_proposals();
+    proposals.extend(cleaners::snap_disabled_revision_proposals());
+
+    if proposals.is_empty() {
+        return;
+    }
+
+    println!("\nProposals (review before acting — not auto-executed):");
+    for p in &proposals {
+        println!("  [{}] {}", p.kind, p.description);
+        println!("      {}", p.command_hint);
+    }
 }
 
 fn human(bytes: u64) -> String {
@@ -862,7 +906,76 @@ fn is_excluded(rel_components: &[&std::ffi::OsStr], excludes: &[Vec<glob::Patter
     })
 }
 
-fn run_backup(dry_run: bool, include_red: bool) -> Result<()> {
+// Measure how many bytes the encrypted remote currently holds and record that
+// against the local filtered total. `rclone size` on a crypt remote reports
+// decrypted sizes, so the two totals are directly comparable.
+//
+// This is the completion signal that replaces "one systemd run exited 0"
+// (TASK-KOI192): on a workstation that reboots several times a day, no single
+// run of a multi-day sync ever ends cleanly, but rclone resumes and progress
+// accrues on the remote regardless.
+fn measure_convergence(
+    local_bytes: u64,
+) -> Result<koi_core::backup_convergence::ConvergenceSnapshot> {
+    use koi_core::backup_convergence::{
+        is_rate_limited, parse_rclone_size_bytes, ConvergenceSnapshot,
+    };
+
+    // --tpslimit paces the listing so it does not exhaust the remote's API
+    // quota. The common case is measuring *while* a sync is in flight, and both
+    // processes draw on the same Google Drive quota — unpaced, the size query
+    // rate-limits itself out (observed 2026-07-27, TASK-KOI192).
+    let output = std::process::Command::new("rclone")
+        .args([
+            "size",
+            "koi-crypt:/",
+            "--json",
+            "--tpslimit",
+            "4",
+            "--retries",
+            "3",
+        ])
+        .output()
+        .context("Failed to run rclone size — is rclone installed and koi-crypt configured?")?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if is_rate_limited(&stderr) {
+            anyhow::bail!(
+                "Remote is rate-limiting the size query — this usually means a backup sync is \
+                 already running and both are drawing on the same Google Drive quota. \
+                 Convergence is unchanged; re-measure once the sync is idle."
+            );
+        }
+        anyhow::bail!("rclone size failed:\n{stderr}");
+    }
+    let remote_bytes = parse_rclone_size_bytes(&String::from_utf8_lossy(&output.stdout))
+        .context("Could not read byte total from rclone size --json")?;
+    Ok(ConvergenceSnapshot::new(
+        local_bytes,
+        remote_bytes,
+        chrono::Utc::now(),
+    ))
+}
+
+fn report_convergence(local_bytes: u64) -> Result<()> {
+    use koi_core::backup_convergence::write_snapshot;
+
+    println!("\nMeasuring remote convergence (rclone size koi-crypt:/)...");
+    let snapshot = measure_convergence(local_bytes)?;
+    write_snapshot(&snapshot).context("Failed to persist convergence snapshot")?;
+
+    println!("  Local (filtered): {}", human(snapshot.local_bytes));
+    println!("  Remote:           {}", human(snapshot.remote_bytes));
+    println!("  Converged:        {}%", snapshot.percent());
+    if snapshot.converged {
+        println!("\n✓ Remote has converged on the local source.");
+    } else {
+        println!("\nStill converging — the next run resumes where this left off.");
+    }
+    Ok(())
+}
+
+fn run_backup(dry_run: bool, include_red: bool, status: bool) -> Result<()> {
     use std::path::PathBuf;
 
     let home = std::env::var_os("HOME")
@@ -978,6 +1091,11 @@ fn run_backup(dry_run: bool, include_red: bool) -> Result<()> {
     }
     println!("  Total:      {} ({})", to_upload.len(), human(total_bytes));
 
+    // --status measures and reports only; it never syncs.
+    if status {
+        return report_convergence(total_bytes);
+    }
+
     if dry_run {
         println!("\nDry run — no files uploaded.");
         println!("Run without --dry-run to sync to rclone remote 'koi-crypt'.");
@@ -1024,7 +1142,23 @@ fn run_backup(dry_run: bool, include_red: bool) -> Result<()> {
     for (root, dest_name) in &sync_roots {
         let dest = format!("koi-crypt:/{dest_name}");
         println!("\nStarting rclone sync {} -> {dest}...", root.display());
-        let mut args: Vec<String> = vec!["sync".into(), "--verbose".into(), "--progress".into()];
+        // --fast-list fetches the remote tree in far fewer API round-trips
+        // instead of walking it directory by directory. That re-walk is the
+        // dominant restart cost here: a reboot kills the sync every few hours
+        // and the next run re-checks the whole tree from cold (TASK-KOI192).
+        //
+        // The trade is memory — rclone holds the full listing in RAM, roughly
+        // 1KB per object, so a few hundred MB at this tree size. Enabled on the
+        // operator's explicit decision (2026-07-27) with the OOM history on this
+        // host understood (INC-KOI009, INC-KOI013, INC-KOI016). If a backup run
+        // is ever implicated in another OOM event, dropping this one flag is the
+        // first thing to try.
+        let mut args: Vec<String> = vec![
+            "sync".into(),
+            "--verbose".into(),
+            "--progress".into(),
+            "--fast-list".into(),
+        ];
         for pattern in &exclude_args {
             args.push("--exclude".into());
             args.push(pattern.clone());
@@ -1044,6 +1178,13 @@ fn run_backup(dry_run: bool, include_red: bool) -> Result<()> {
 
     println!("\n✓ Backup completed successfully.");
     println!("Synced: {}", human(total_bytes));
+
+    // Record convergence so `koi check` can report it without a network call.
+    // Best-effort: the sync genuinely succeeded, so a failed measurement must
+    // not turn that into a failed run.
+    if let Err(err) = report_convergence(total_bytes) {
+        eprintln!("Warning: could not measure remote convergence: {err:#}");
+    }
     Ok(())
 }
 
@@ -1136,7 +1277,9 @@ fn run_report(output: Option<std::path::PathBuf>) -> Result<()> {
     let conn = open_state()?;
     let monitors = [
         "DiskMonitor",
+        "BackupMonitor",
         "MemoryMonitor",
+        "ModelSizeMonitor",
         "CacheMonitor",
         "DockerMonitor",
         "GitMonitor",
@@ -1542,7 +1685,9 @@ fn run_reject(id_prefix: &str) -> Result<()> {
 fn run_check(json: bool) -> Result<()> {
     let monitors: Vec<Box<dyn Monitor>> = vec![
         Box::new(DiskMonitor::new().context("DiskMonitor init")?),
+        Box::new(BackupMonitor::new()),
         Box::new(MemoryMonitor::new()),
+        Box::new(ModelSizeMonitor::new()),
         Box::new(CacheMonitor::new().context("CacheMonitor init")?),
         Box::new(DockerMonitor::new()),
         Box::new(GitMonitor::new().context("GitMonitor init")?),

@@ -59,12 +59,15 @@ windows:
     - "%APPDATA%/npm-cache"
     - "%USERPROFILE%/.cargo/registry/cache"
     - "%LOCALAPPDATA%/pip/Cache"
-    - "%APPDATA%/Cursor/Cache"
-    - "%APPDATA%/Cursor/Code Cache"
     # Windows Update download cache — clear ONLY when no update is mid-flight
     - "%WINDIR%/SoftwareDistribution/Download"
   protected_paths:
     # Large but user-owned or OS-critical — never auto-clean; propose-approve only
+    # Cursor's Chromium caches regenerate, but the editor is the operator's live
+    # workspace — deleting them under a running Cursor is disruptive, so these
+    # are proposals, never an unattended sweep.
+    - "%APPDATA%/Cursor/Cache"
+    - "%APPDATA%/Cursor/Code Cache"
     - "%USERPROFILE%/Desktop"
     - "%USERPROFILE%/Documents"
     - "%USERPROFILE%/Music"

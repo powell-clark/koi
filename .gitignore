@@ -43,9 +43,7 @@ config/local.yaml
 .coverage
 htmlcov/
 .venv/
-.claude/*
-!.claude/commands/
-!.claude/commands/**
+.claude/
 
 # CONSCIOUSNESS tracking file symlinks (point to subdirectories)
 CONSCIOUSNESS/ROADMAP.md
@@ -80,9 +78,6 @@ CONSCIOUSNESS/BACKLOG.md
 .claude/skills/
 .claude/memory/
 
-# Agent definitions - these SHOULD be tracked (source of truth)
-!.claude/agents/
-
 # CONSCIOUSNESS brain files that shouldn't be in git (runtime only)
 CONSCIOUSNESS/performance/sessions/*.json
 CONSCIOUSNESS/scratchpad/current-context.md
@@ -110,8 +105,27 @@ target/
 # (Overrides the broad *.lock rule above.)
 !Cargo.lock
 
-# CLAUDE.md carries operational instructions (worklog conventions, autonomy
-# rules, machine-specific detail) — was previously untracked only via a
-# local .git/info/exclude entry, which doesn't travel with the repo on a
-# fresh clone. Tracked here instead so the exclusion is real everywhere.
-/CLAUDE.md
+# ── Private/operational layer — never in the public repo, on any machine ──
+# These were previously untracked only via .git/info/exclude, which does not
+# travel with the repo: a fresh clone (the other machine, or anyone else) had
+# nothing stopping them from being added and pushed. Tracked here so the
+# exclusion holds everywhere. CLAUDE.md and AGENTS.md are tracked on purpose:
+# they carry rules only — machine-specific state lives in data/host.yaml.
+/CONSCIOUSNESS/
+/src/
+/pyproject.toml
+/.python-version
+/deploy/
+/dotfiles/
+/hooks/
+/skills/
+/evals/
+/reports/
+/gdrive-migration-playbook.md
+/LINUX_STORAGE_REQUEST.md
+/docs/DEPLOYMENT.md
+/docs/PROJECT-STATUS.md
+/docs/BUSINESS-PLAN.md
+/config/*.dconf
+/config/*.service
+.aider*

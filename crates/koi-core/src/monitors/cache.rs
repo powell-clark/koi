@@ -4,6 +4,12 @@
 //! Uses a 6-hour JSON cache for size snapshots since walking e.g. `.cache/uv`
 //! can take seconds.
 
+use crate::{
+    fs_size::dir_size,
+    monitor::Monitor,
+    types::{HealthStatus, MonitorReport, Observation, Severity, Suggestion},
+    Result,
+};
 use chrono::Utc;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -11,13 +17,6 @@ use std::{
     fs,
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
-};
-use walkdir::WalkDir;
-
-use crate::{
-    monitor::Monitor,
-    types::{HealthStatus, MonitorReport, Observation, Severity, Suggestion},
-    Result,
 };
 
 const STALE_DAYS: u64 = 30;
@@ -240,17 +239,6 @@ impl Monitor for CacheMonitor {
             suggestions,
         })
     }
-}
-
-fn dir_size(path: &Path) -> u64 {
-    WalkDir::new(path)
-        .follow_links(false)
-        .into_iter()
-        .filter_map(|e| e.ok())
-        .filter_map(|e| e.metadata().ok())
-        .filter(|m| m.is_file())
-        .map(|m| m.len())
-        .sum()
 }
 
 fn access_age_days(path: &Path) -> Option<i64> {

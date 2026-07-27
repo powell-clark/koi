@@ -73,3 +73,12 @@ security:
 
   opensnitch:
     # No config needed — reads from /etc/opensnitchd/ directly
+
+# Local LLM model files (Ollama, HuggingFace hub, loose *.gguf)
+model_size:
+  # Fraction of total RAM a single model file may occupy before koi warns
+  # (file + KV cache + inference overhead must fit alongside normal desktop
+  # workload under systemd-oomd's pressure limit). See INC-KOI016.
+  ceiling_ratio_of_ram: 0.6
+  # Below this, a file isn't worth walking stores for.
+  size_floor_gib: 2
