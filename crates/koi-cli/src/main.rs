@@ -55,6 +55,10 @@ enum Command {
         /// Include red-tier sensitive data (secrets, keys). Requires explicit confirmation.
         #[arg(long)]
         include_red: bool,
+        /// Measure how far the encrypted remote has converged on the local
+        /// source and persist the result for `koi check`. Syncs nothing.
+        #[arg(long)]
+        status: bool,
     },
     /// Start continuous health monitoring.
     Monitor,
@@ -175,7 +179,8 @@ fn main() -> Result<()> {
         Command::Backup {
             dry_run,
             include_red,
-        } => run_backup(dry_run, include_red)?,
+            status,
+        } => run_backup(dry_run, include_red, status)?,
         Command::Monitor => run_monitor()?,
         Command::Scan { json } => run_scan(json)?,
         Command::Proposals => run_proposals()?,
@@ -901,7 +906,57 @@ fn is_excluded(rel_components: &[&std::ffi::OsStr], excludes: &[Vec<glob::Patter
     })
 }
 
-fn run_backup(dry_run: bool, include_red: bool) -> Result<()> {
+// Measure how many bytes the encrypted remote currently holds and record that
+// against the local filtered total. `rclone size` on a crypt remote reports
+// decrypted sizes, so the two totals are directly comparable.
+//
+// This is the completion signal that replaces "one systemd run exited 0"
+// (TASK-KOI192): on a workstation that reboots several times a day, no single
+// run of a multi-day sync ever ends cleanly, but rclone resumes and progress
+// accrues on the remote regardless.
+fn measure_convergence(
+    local_bytes: u64,
+) -> Result<koi_core::backup_convergence::ConvergenceSnapshot> {
+    use koi_core::backup_convergence::{parse_rclone_size_bytes, ConvergenceSnapshot};
+
+    let output = std::process::Command::new("rclone")
+        .args(["size", "koi-crypt:/", "--json"])
+        .output()
+        .context("Failed to run rclone size — is rclone installed and koi-crypt configured?")?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "rclone size failed:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    let remote_bytes = parse_rclone_size_bytes(&String::from_utf8_lossy(&output.stdout))
+        .context("Could not read byte total from rclone size --json")?;
+    Ok(ConvergenceSnapshot::new(
+        local_bytes,
+        remote_bytes,
+        chrono::Utc::now(),
+    ))
+}
+
+fn report_convergence(local_bytes: u64) -> Result<()> {
+    use koi_core::backup_convergence::write_snapshot;
+
+    println!("\nMeasuring remote convergence (rclone size koi-crypt:/)...");
+    let snapshot = measure_convergence(local_bytes)?;
+    write_snapshot(&snapshot).context("Failed to persist convergence snapshot")?;
+
+    println!("  Local (filtered): {}", human(snapshot.local_bytes));
+    println!("  Remote:           {}", human(snapshot.remote_bytes));
+    println!("  Converged:        {}%", snapshot.percent());
+    if snapshot.converged {
+        println!("\n✓ Remote has converged on the local source.");
+    } else {
+        println!("\nStill converging — the next run resumes where this left off.");
+    }
+    Ok(())
+}
+
+fn run_backup(dry_run: bool, include_red: bool, status: bool) -> Result<()> {
     use std::path::PathBuf;
 
     let home = std::env::var_os("HOME")
@@ -1017,6 +1072,11 @@ fn run_backup(dry_run: bool, include_red: bool) -> Result<()> {
     }
     println!("  Total:      {} ({})", to_upload.len(), human(total_bytes));
 
+    // --status measures and reports only; it never syncs.
+    if status {
+        return report_convergence(total_bytes);
+    }
+
     if dry_run {
         println!("\nDry run — no files uploaded.");
         println!("Run without --dry-run to sync to rclone remote 'koi-crypt'.");
@@ -1083,6 +1143,13 @@ fn run_backup(dry_run: bool, include_red: bool) -> Result<()> {
 
     println!("\n✓ Backup completed successfully.");
     println!("Synced: {}", human(total_bytes));
+
+    // Record convergence so `koi check` can report it without a network call.
+    // Best-effort: the sync genuinely succeeded, so a failed measurement must
+    // not turn that into a failed run.
+    if let Err(err) = report_convergence(total_bytes) {
+        eprintln!("Warning: could not measure remote convergence: {err:#}");
+    }
     Ok(())
 }
 

@@ -7,6 +7,7 @@
 use chrono::{Local, NaiveDateTime, Utc};
 
 use crate::{
+    backup_convergence::{classify_convergence, read_snapshot, ConvergenceState},
     monitor::Monitor,
     types::{HealthStatus, MonitorReport, Observation, Severity, Suggestion},
     Result,
@@ -55,6 +56,45 @@ fn classify_backup(
     }
 }
 
+/// How to report a run that a reboot cut short, given what the remote actually
+/// holds.
+///
+/// The unit state and convergence answer different questions: the unit says
+/// whether the last *run* ended cleanly, convergence says whether the *data*
+/// reached the remote. On this host a reboot kills the run nearly every time,
+/// so the unit state alone reads as a permanent warning even once everything is
+/// safely backed up. Convergence is the authority on whether the data is safe.
+fn interrupted_resolution(
+    convergence: &ConvergenceState,
+    percent: u64,
+) -> (HealthStatus, Option<Suggestion>) {
+    match convergence {
+        // The run never exits cleanly here, but the data is on the remote.
+        // That is a healthy backup, not a warning.
+        ConvergenceState::Converged => (HealthStatus::Healthy, None),
+        ConvergenceState::Converging => (
+            HealthStatus::Warning,
+            Some(Suggestion {
+                message: format!(
+                    "Encrypted backup interrupted mid-sync (likely a reboot) — remote is {percent}% converged and resumes on the next run"
+                ),
+                severity: Severity::Warning,
+                action_hint: Some("koi backup --status".into()),
+            }),
+        ),
+        ConvergenceState::SnapshotStale | ConvergenceState::NeverMeasured => (
+            HealthStatus::Warning,
+            Some(Suggestion {
+                message:
+                    "Encrypted backup was interrupted before completing, and remote convergence has not been measured recently — cannot confirm the data is safe"
+                        .into(),
+                severity: Severity::Warning,
+                action_hint: Some("koi backup --status".into()),
+            }),
+        ),
+    }
+}
+
 pub struct BackupMonitor;
 
 impl Default for BackupMonitor {
@@ -100,77 +140,95 @@ impl Monitor for BackupMonitor {
             severity: Severity::Info,
         }];
 
-        let (status, suggestion) = match classify_backup(
-            active_state,
-            result,
-            last_success_age_hours,
-        ) {
-            BackupState::Running => {
-                observations.push(Observation {
-                    key: "backup_running".into(),
-                    value: serde_json::json!(true),
-                    severity: Severity::Info,
-                });
-                (HealthStatus::Healthy, None)
-            }
-            BackupState::Interrupted => {
-                observations.push(Observation {
-                    key: "backup_interrupted".into(),
-                    value: serde_json::json!({ "result": result }),
-                    severity: Severity::Warning,
-                });
-                (
-                    HealthStatus::Warning,
+        // Cheap file read of the snapshot `koi backup --status` persists — the
+        // measurement itself needs a network round-trip and cannot run inside
+        // this monitor's 200ms budget.
+        let snapshot = read_snapshot();
+        let convergence = classify_convergence(snapshot.as_ref(), Utc::now());
+        let percent = snapshot.as_ref().map(|s| s.percent()).unwrap_or(0);
+        observations.push(Observation {
+            key: "remote_convergence".into(),
+            value: match &snapshot {
+                Some(snapshot) => serde_json::json!({
+                    "state": format!("{convergence:?}"),
+                    "percent": percent,
+                    "local_bytes": snapshot.local_bytes,
+                    "remote_bytes": snapshot.remote_bytes,
+                    "measured_at": snapshot.measured_at,
+                }),
+                None => serde_json::json!({ "state": format!("{convergence:?}") }),
+            },
+            severity: match convergence {
+                ConvergenceState::Converged => Severity::Info,
+                _ => Severity::Warning,
+            },
+        });
+
+        let (status, suggestion) =
+            match classify_backup(active_state, result, last_success_age_hours) {
+                BackupState::Running => {
+                    observations.push(Observation {
+                        key: "backup_running".into(),
+                        value: serde_json::json!(true),
+                        severity: Severity::Info,
+                    });
+                    (HealthStatus::Healthy, None)
+                }
+                BackupState::Interrupted => {
+                    let (status, suggestion) = interrupted_resolution(&convergence, percent);
+                    observations.push(Observation {
+                        key: "backup_interrupted".into(),
+                        value: serde_json::json!({ "result": result, "percent": percent }),
+                        severity: match status {
+                            HealthStatus::Healthy => Severity::Info,
+                            _ => Severity::Warning,
+                        },
+                    });
+                    (status, suggestion)
+                }
+                BackupState::Failed => (
+                    HealthStatus::Critical,
                     Some(Suggestion {
-                        message: "Encrypted backup was interrupted before completing (likely a reboot mid-sync) — it will resume on the next run".into(),
-                        severity: Severity::Warning,
+                        message: format!("Encrypted backup service failed ({result})"),
+                        severity: Severity::Critical,
                         action_hint: Some("journalctl --user -u koi-backup.service".into()),
                     }),
-                )
-            }
-            BackupState::Failed => (
-                HealthStatus::Critical,
-                Some(Suggestion {
-                    message: format!("Encrypted backup service failed ({result})"),
-                    severity: Severity::Critical,
-                    action_hint: Some("journalctl --user -u koi-backup.service".into()),
-                }),
-            ),
-            BackupState::Stale => {
-                let age_hours = last_success_age_hours.unwrap_or_default();
-                observations.push(Observation {
-                    key: "last_success_age_hours".into(),
-                    value: serde_json::json!(age_hours),
-                    severity: Severity::Warning,
-                });
-                (
-                    HealthStatus::Warning,
-                    Some(Suggestion {
-                        message: format!(
+                ),
+                BackupState::Stale => {
+                    let age_hours = last_success_age_hours.unwrap_or_default();
+                    observations.push(Observation {
+                        key: "last_success_age_hours".into(),
+                        value: serde_json::json!(age_hours),
+                        severity: Severity::Warning,
+                    });
+                    (
+                        HealthStatus::Warning,
+                        Some(Suggestion {
+                            message: format!(
                             "Encrypted backup is stale — last success was {age_hours} hours ago"
                         ),
+                            severity: Severity::Warning,
+                            action_hint: Some("systemctl --user start koi-backup.service".into()),
+                        }),
+                    )
+                }
+                BackupState::Healthy => {
+                    observations.push(Observation {
+                        key: "last_success_age_hours".into(),
+                        value: serde_json::json!(last_success_age_hours.unwrap_or_default()),
+                        severity: Severity::Info,
+                    });
+                    (HealthStatus::Healthy, None)
+                }
+                BackupState::NeverRan => (
+                    HealthStatus::Warning,
+                    Some(Suggestion {
+                        message: "Encrypted backup has no completed run recorded".into(),
                         severity: Severity::Warning,
                         action_hint: Some("systemctl --user start koi-backup.service".into()),
                     }),
-                )
-            }
-            BackupState::Healthy => {
-                observations.push(Observation {
-                    key: "last_success_age_hours".into(),
-                    value: serde_json::json!(last_success_age_hours.unwrap_or_default()),
-                    severity: Severity::Info,
-                });
-                (HealthStatus::Healthy, None)
-            }
-            BackupState::NeverRan => (
-                HealthStatus::Warning,
-                Some(Suggestion {
-                    message: "Encrypted backup has no completed run recorded".into(),
-                    severity: Severity::Warning,
-                    action_hint: Some("systemctl --user start koi-backup.service".into()),
-                }),
-            ),
-        };
+                ),
+            };
 
         Ok(MonitorReport {
             monitor: self.name().into(),
@@ -293,5 +351,38 @@ mod tests {
     #[test]
     fn no_recorded_run_is_never_ran() {
         assert_eq!(classify_backup("inactive", "", None), BackupState::NeverRan);
+    }
+
+    #[test]
+    fn converged_interrupted_run_is_healthy_not_warning() {
+        // The whole point of TASK-KOI192: on this host the run is killed by a
+        // reboot nearly every time, so "no clean exit" must not mean "unsafe"
+        // once the data has actually reached the remote.
+        let (status, suggestion) = interrupted_resolution(&ConvergenceState::Converged, 100);
+        assert_eq!(status, HealthStatus::Healthy);
+        assert!(suggestion.is_none());
+    }
+
+    #[test]
+    fn converging_interrupted_run_warns_with_measured_progress() {
+        let (status, suggestion) = interrupted_resolution(&ConvergenceState::Converging, 63);
+        assert_eq!(status, HealthStatus::Warning);
+        let message = suggestion.expect("converging run should suggest").message;
+        assert!(
+            message.contains("63%"),
+            "operator needs the real number, got: {message}"
+        );
+    }
+
+    #[test]
+    fn unmeasured_interrupted_run_will_not_claim_the_data_is_safe() {
+        for convergence in [
+            ConvergenceState::NeverMeasured,
+            ConvergenceState::SnapshotStale,
+        ] {
+            let (status, suggestion) = interrupted_resolution(&convergence, 0);
+            assert_eq!(status, HealthStatus::Warning, "{convergence:?}");
+            assert!(suggestion.is_some(), "{convergence:?}");
+        }
     }
 }
