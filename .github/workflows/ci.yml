@@ -2,9 +2,8 @@ name: ci
 
 # Fast cross-platform check for the logic crates (no GUI/webkit deps).
 # This is the "do the ported monitors compile and pass on macOS and Windows"
-# signal. The expensive macOS/Windows runners only run on push to main (and
-# on-demand); pull requests run ubuntu-only, which catches the bulk of breakage
-# cheaply. Cross-platform breakage still surfaces at merge.
+# signal, and it runs on every trigger — pull requests included — so
+# cross-platform breakage is caught before merge rather than after it.
 #
 # Docs-only changes skip the Rust builds (see paths-ignore below) — they cannot
 # affect compilation or tests.
@@ -37,15 +36,16 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # PRs run ubuntu only (cheap); push-to-main + on-demand run all three
-        # OSes. macOS minutes bill at ~10x Linux, so this is the main saving.
-        os: >-
-          ${{ github.event_name == 'pull_request'
-              && fromJSON('["ubuntu-latest"]')
-              || fromJSON('["ubuntu-latest","macos-latest","windows-latest"]') }}
+        # Every trigger runs all three OSes. This repo is public, and GitHub
+        # Actions standard runners — macOS and Windows included — are free for
+        # public repositories; the ~10x macOS multiplier is private-repo
+        # billing. An earlier version restricted pull requests to ubuntu to
+        # save minutes that were never being charged, which bought nothing and
+        # let cross-platform breakage reach main unverified.
+        os: [ubuntu-latest, macos-latest, windows-latest]
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       # Toolchain version comes from rust-toolchain.toml (pinned for
       # reproducibility); components are added on top.
