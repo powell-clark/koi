@@ -403,6 +403,19 @@ fn main() {
                     "open" => toggle_popover(app),
                     _ => {}
                 })
+                // macOS and Windows only, despite the unconditional registration
+                // (TASK-KOI204). The ayatana backend behind the Linux tray exposes
+                // no Activate method on its StatusNotifierItem, so a panel click is
+                // never delivered to the app and this arm cannot fire there.
+                //
+                // Linux is not left without an affordance: set_show_menu_on_left_click
+                // is itself Linux-unsupported — tray-icon implements it for macOS and
+                // Windows only and discards the value elsewhere — so the false above
+                // does not apply and left click keeps the appindicator default of
+                // opening the menu. "Open koi" then reaches toggle_popover. Two clicks
+                // on Linux, one on the platforms where this handler runs. Removing the
+                // false to "fix" the left click would change nothing on Linux and would
+                // break the direct-open behaviour on the other two.
                 .on_tray_icon_event(|tray, event| {
                     if let TrayIconEvent::Click {
                         button: MouseButton::Left,
