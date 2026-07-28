@@ -153,6 +153,29 @@ fn tooltip_for(reports: &[MonitorReport], overall: HealthStatus) -> String {
     }
 }
 
+/// The one word the Linux panel has room for: which monitor is unhappy.
+///
+/// The ayatana backend behind the tray on Linux discards tooltips outright —
+/// `tray-icon`'s GTK `set_tooltip` is a bare `Ok(())` and its docs say
+/// "Linux: Unsupported" — so `tooltip_for`'s sentence never reaches the panel
+/// (TASK-KOI203). The label beside the icon is the only text that does. Upstream
+/// warns it "shouldn't be shown unless a user requests it as it can take up a
+/// significant amount of space on the user's panel", so it stays empty while
+/// everything is healthy and names the worst monitor when it is not. The reason
+/// behind that name lives one click away in the popover.
+fn panel_label_for(reports: &[MonitorReport], overall: HealthStatus) -> Option<String> {
+    if overall == HealthStatus::Healthy {
+        return None;
+    }
+    let worst = worst_monitor(reports, overall)?;
+    let name = worst
+        .monitor
+        .strip_suffix("Monitor")
+        .filter(|trimmed| !trimmed.is_empty())
+        .unwrap_or(&worst.monitor);
+    Some(name.to_string())
+}
+
 fn icon_for(status: HealthStatus) -> tauri::Result<Image<'static>> {
     let bytes = match status {
         HealthStatus::Healthy => ICON_GREEN,
@@ -175,8 +198,16 @@ fn paint_tray(app: &AppHandle, reports: &[MonitorReport], overall: HealthStatus)
         }
         Err(e) => warn!("icon decode failed: {e}"),
     }
+    // macOS and Windows render this on hover. Linux silently drops it — see
+    // panel_label_for, which carries the same information there instead.
     if let Err(e) = tray.set_tooltip(Some(tooltip_for(reports, overall))) {
         warn!("set_tooltip failed: {e}");
+    }
+    // Linux only: on macOS a label would duplicate the working tooltip in the
+    // menu bar, and Windows ignores titles altogether.
+    #[cfg(target_os = "linux")]
+    if let Err(e) = tray.set_title(panel_label_for(reports, overall)) {
+        warn!("set_title failed: {e}");
     }
 }
 
@@ -542,5 +573,37 @@ mod tests {
     #[test]
     fn refresh_interval_is_the_specified_slow_tick() {
         assert_eq!(REFRESH_INTERVAL, Duration::from_secs(30));
+    }
+
+    #[test]
+    fn panel_label_stays_empty_while_healthy() {
+        let reports = [
+            report("CacheMonitor", HealthStatus::Healthy),
+            report("DiskMonitor", HealthStatus::Healthy),
+        ];
+        assert_eq!(panel_label_for(&reports, HealthStatus::Healthy), None);
+        assert_eq!(panel_label_for(&[], HealthStatus::Healthy), None);
+    }
+
+    #[test]
+    fn panel_label_names_the_worst_monitor_when_degraded() {
+        let reports = [
+            report("CacheMonitor", HealthStatus::Healthy),
+            report("DiskMonitor", HealthStatus::Critical),
+            report("GitMonitor", HealthStatus::Warning),
+        ];
+        assert_eq!(
+            panel_label_for(&reports, HealthStatus::Critical),
+            Some("Disk".to_string())
+        );
+    }
+
+    #[test]
+    fn panel_label_keeps_names_that_do_not_end_in_monitor() {
+        let reports = [report("Backup", HealthStatus::Warning)];
+        assert_eq!(
+            panel_label_for(&reports, HealthStatus::Warning),
+            Some("Backup".to_string())
+        );
     }
 }
