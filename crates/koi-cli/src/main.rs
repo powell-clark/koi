@@ -921,15 +921,20 @@ fn measure_convergence(
         is_rate_limited, parse_rclone_size_bytes, ConvergenceSnapshot,
     };
 
-    // --tpslimit paces the listing so it does not exhaust the remote's API
-    // quota. The common case is measuring *while* a sync is in flight, and both
-    // processes draw on the same Google Drive quota — unpaced, the size query
-    // rate-limits itself out (observed 2026-07-27, TASK-KOI192).
+    // --fast-list is what makes this viable: it walks the remote recursively in
+    // a few large listings instead of one API call per directory. --tpslimit
+    // then paces those few calls so the query does not exhaust the Drive quota
+    // when a sync is running and both draw on it (observed 2026-07-27).
+    //
+    // The two flags are load-bearing *together*. Throttling to 4 tps without
+    // --fast-list throttles a per-directory walk and the measurement crawls —
+    // 23 minutes without finishing on this tree before --fast-list was added.
     let output = std::process::Command::new("rclone")
         .args([
             "size",
             "koi-crypt:/",
             "--json",
+            "--fast-list",
             "--tpslimit",
             "4",
             "--retries",
