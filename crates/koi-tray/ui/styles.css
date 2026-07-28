@@ -10,6 +10,21 @@
   --red: #e74c3c;
   --accent: #ff2d78;
 }
+/* The panel sits against the desktop, so it should follow the desktop rather
+   than assert a dark theme at someone running a light one. Only the surface
+   tokens flip — the status colours stay put, because green/amber/red have to
+   mean the same thing in both themes and the pill's near-black label reads on
+   all three either way. */
+@media (prefers-color-scheme: light) {
+  :root {
+    --bg: #f6f5f4;
+    --panel: #ffffff;
+    --panel-2: #f2f1f0;
+    --text: #1b1f24;
+    --muted: #5c6672;
+    --border: #d4d0cc;
+  }
+}
 * { box-sizing: border-box; margin: 0; padding: 0; }
 html, body {
   background: var(--bg);

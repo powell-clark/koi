@@ -428,6 +428,18 @@ fn main() {
                 })
                 .build(app)?;
 
+            // Standard tray-popover behaviour: clicking away dismisses the panel.
+            // Without this the window is alwaysOnTop and undecorated, so it has no
+            // close button and simply sits over whatever the operator does next.
+            if let Some(win) = app.get_webview_window("main") {
+                let popover = win.clone();
+                win.on_window_event(move |event| {
+                    if let tauri::WindowEvent::Focused(false) = event {
+                        let _ = popover.hide();
+                    }
+                });
+            }
+
             // Paint the real health colour at startup, then keep it current.
             if let Err(e) = refresh_tray(app.handle()) {
                 warn!("initial tray refresh: {e}");
