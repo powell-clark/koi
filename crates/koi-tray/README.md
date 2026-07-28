@@ -46,6 +46,23 @@ cargo tauri build                        # bundle .deb/.AppImage (Linux), .dmg (
 in `icons/` (RGBA PNGs, required by Tauri's build script); the status-colour tray
 icons are in `icons/status/`.
 
+## Status icons
+
+`icons/status/{green,amber,red}.png` are 32×32 RGBA discs, 4×4 supersampled:
+
+| element   | geometry            | colour                                        |
+|-----------|---------------------|-----------------------------------------------|
+| rim       | radius 14 → 12      | `#10161d`                                     |
+| fill      | radius 12           | green `#2fa363`, amber `#e2900f`, red `#d84438` |
+| highlight | radius 12 → 11      | white at 30% alpha                            |
+
+A panel can be any colour, so the icons carry their own contrast rather than
+shipping separate light and dark variants. The near-black rim defines the shape
+against a light panel (18.2:1) and the saturated fill carries it against a dark
+one (4.8–8.2:1) — both clear of the 3:1 floor WCAG 1.4.11 sets for graphical
+objects. Regenerate them if the palette changes; keep the measured ratios above
+3:1 on both extremes.
+
 ## Cross-platform CI builds
 
 Every push to `main` that touches the tray, koi-core, or the workspace manifest

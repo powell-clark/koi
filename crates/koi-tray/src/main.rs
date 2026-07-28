@@ -11,9 +11,10 @@
 use koi_core::{
     filing::{self, Outcome, ProposedAction},
     state,
-    types::HealthStatus,
+    types::{HealthStatus, MonitorReport, Severity},
 };
 use serde::Serialize;
+use std::time::Duration;
 use tauri::{
     image::Image,
     menu::{MenuBuilder, MenuItemBuilder},
@@ -23,6 +24,12 @@ use tauri::{
 use tracing::{info, warn};
 
 const TRAY_ID: &str = "koi";
+
+/// Slow enough not to thrash the panel, fast enough to feel live.
+const REFRESH_INTERVAL: Duration = Duration::from_secs(30);
+
+/// Tray tooltips truncate on some panels; keep the reason short enough to read.
+const MAX_REASON_CHARS: usize = 90;
 
 // Status icons rendered at build time (icons/status/*.png).
 const ICON_GREEN: &[u8] = include_bytes!("../icons/status/green.png");
@@ -73,7 +80,7 @@ fn status_str(s: HealthStatus) -> &'static str {
 }
 
 /// Worst status wins — one critical monitor makes the whole system critical.
-fn overall_status(reports: &[koi_core::types::MonitorReport]) -> HealthStatus {
+fn overall_status(reports: &[MonitorReport]) -> HealthStatus {
     let mut worst = HealthStatus::Healthy;
     for r in reports {
         worst = match (worst, r.status) {
@@ -85,6 +92,67 @@ fn overall_status(reports: &[koi_core::types::MonitorReport]) -> HealthStatus {
     worst
 }
 
+/// The monitor that set the overall status — reports arrive sorted by name, so
+/// the first match at that severity is stable between ticks.
+fn worst_monitor(reports: &[MonitorReport], overall: HealthStatus) -> Option<&MonitorReport> {
+    reports.iter().find(|r| r.status == overall)
+}
+
+/// Why that monitor is unhappy: its matching suggestion, else any suggestion,
+/// else the observation key that tripped.
+fn reason(report: &MonitorReport) -> Option<String> {
+    let want = match report.status {
+        HealthStatus::Critical => Severity::Critical,
+        HealthStatus::Warning => Severity::Warning,
+        HealthStatus::Healthy => return None,
+    };
+    let message = report
+        .suggestions
+        .iter()
+        .find(|s| s.severity == want)
+        .or_else(|| report.suggestions.first())
+        .map(|s| s.message.clone())
+        .or_else(|| {
+            report
+                .observations
+                .iter()
+                .find(|o| o.severity == want)
+                .map(|o| o.key.clone())
+        })?;
+    Some(truncate(message.trim(), MAX_REASON_CHARS))
+}
+
+fn truncate(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    let head: String = s.chars().take(max.saturating_sub(1)).collect();
+    format!("{}…", head.trim_end())
+}
+
+/// One line the operator can read at a glance from the panel.
+fn tooltip_for(reports: &[MonitorReport], overall: HealthStatus) -> String {
+    if reports.is_empty() {
+        return "koi — no monitor reports yet (run `koi check`)".to_string();
+    }
+    if overall == HealthStatus::Healthy {
+        let n = reports.len();
+        let plural = if n == 1 { "monitor" } else { "monitors" };
+        return format!("koi — all {n} {plural} healthy");
+    }
+    let Some(worst) = worst_monitor(reports, overall) else {
+        return format!("koi — {}", status_str(overall));
+    };
+    match reason(worst) {
+        Some(why) => format!(
+            "koi — {} {}: {why}",
+            worst.monitor,
+            status_str(worst.status)
+        ),
+        None => format!("koi — {} {}", worst.monitor, status_str(worst.status)),
+    }
+}
+
 fn icon_for(status: HealthStatus) -> tauri::Result<Image<'static>> {
     let bytes = match status {
         HealthStatus::Healthy => ICON_GREEN,
@@ -94,21 +162,51 @@ fn icon_for(status: HealthStatus) -> tauri::Result<Image<'static>> {
     Image::from_bytes(bytes)
 }
 
-/// Recompute overall health and repaint the tray icon to match.
-fn refresh_tray_icon(app: &AppHandle) {
-    let status =
-        match open_db().and_then(|c| state::latest_reports_all(&c).map_err(|e| e.to_string())) {
-            Ok(reports) => overall_status(&reports),
-            Err(e) => {
-                warn!("tray icon refresh: {e}");
-                return;
+/// Paint icon and tooltip from reports already in hand.
+fn paint_tray(app: &AppHandle, reports: &[MonitorReport], overall: HealthStatus) {
+    let Some(tray) = app.tray_by_id(TRAY_ID) else {
+        return;
+    };
+    match icon_for(overall) {
+        Ok(icon) => {
+            if let Err(e) = tray.set_icon(Some(icon)) {
+                warn!("set_icon failed: {e}");
             }
-        };
-    if let (Some(tray), Ok(icon)) = (app.tray_by_id(TRAY_ID), icon_for(status)) {
-        if let Err(e) = tray.set_icon(Some(icon)) {
-            warn!("set_icon failed: {e}");
         }
+        Err(e) => warn!("icon decode failed: {e}"),
     }
+    if let Err(e) = tray.set_tooltip(Some(tooltip_for(reports, overall))) {
+        warn!("set_tooltip failed: {e}");
+    }
+}
+
+/// Read the latest monitor reports and repaint the tray to match.
+fn refresh_tray(app: &AppHandle) -> Result<(), String> {
+    let conn = open_db()?;
+    let reports = state::latest_reports_all(&conn).map_err(|e| e.to_string())?;
+    let overall = overall_status(&reports);
+    paint_tray(app, &reports, overall);
+    Ok(())
+}
+
+/// Repaint on a slow tick so the panel reflects current state without thrash.
+/// A persistent failure (no database yet) is logged once, not every tick.
+fn start_refresh_tick(app: AppHandle) {
+    std::thread::spawn(move || {
+        let mut last_err: Option<String> = None;
+        loop {
+            std::thread::sleep(REFRESH_INTERVAL);
+            match refresh_tray(&app) {
+                Ok(()) => last_err = None,
+                Err(e) => {
+                    if last_err.as_deref() != Some(e.as_str()) {
+                        warn!("tray refresh: {e}");
+                        last_err = Some(e);
+                    }
+                }
+            }
+        }
+    });
 }
 
 fn toggle_popover(app: &AppHandle) {
@@ -136,10 +234,8 @@ fn health_summary(app: AppHandle) -> Result<HealthSummary, String> {
         .map_err(|e| e.to_string())?
         .len();
 
-    // Keep the tray icon in sync whenever the popover refreshes.
-    if let (Some(tray), Ok(icon)) = (app.tray_by_id(TRAY_ID), icon_for(overall)) {
-        let _ = tray.set_icon(Some(icon));
-    }
+    // Keep the tray in sync whenever the popover refreshes.
+    paint_tray(&app, &reports, overall);
 
     let monitors = reports
         .into_iter()
@@ -211,7 +307,7 @@ fn approve_proposal(app: AppHandle, id: String) -> Result<(), String> {
                 rusqlite::params![p.id.0],
             )
             .map_err(|e| e.to_string())?;
-            refresh_tray_icon(&app);
+            let _ = refresh_tray(&app);
             Ok(())
         }
         Outcome::Skipped(why) => Err(format!("skipped: {why}")),
@@ -240,7 +336,7 @@ fn reject_proposal(app: AppHandle, id: String) -> Result<(), String> {
         Some("rejected via tray"),
     )
     .map_err(|e| e.to_string())?;
-    refresh_tray_icon(&app);
+    let _ = refresh_tray(&app);
     Ok(())
 }
 
@@ -288,12 +384,163 @@ fn main() {
                 })
                 .build(app)?;
 
-            // Paint the real health colour at startup.
-            refresh_tray_icon(app.handle());
+            // Paint the real health colour at startup, then keep it current.
+            if let Err(e) = refresh_tray(app.handle()) {
+                warn!("initial tray refresh: {e}");
+            }
+            start_refresh_tick(app.handle().clone());
 
             info!("koi system tray initialized");
             Ok(())
         })
         .run(tauri::generate_context!())
         .expect("error while running koi tray application");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Utc;
+    use koi_core::types::{Observation, Suggestion};
+
+    fn report(monitor: &str, status: HealthStatus) -> MonitorReport {
+        MonitorReport {
+            monitor: monitor.into(),
+            status,
+            elapsed_ms: 1,
+            collected_at: Utc::now(),
+            observations: vec![],
+            suggestions: vec![],
+        }
+    }
+
+    fn with_suggestion(mut r: MonitorReport, message: &str, severity: Severity) -> MonitorReport {
+        r.suggestions.push(Suggestion {
+            message: message.into(),
+            severity,
+            action_hint: None,
+        });
+        r
+    }
+
+    #[test]
+    fn any_critical_makes_the_whole_system_critical() {
+        let reports = [
+            report("CacheMonitor", HealthStatus::Healthy),
+            report("DiskMonitor", HealthStatus::Critical),
+            report("GitMonitor", HealthStatus::Warning),
+        ];
+        assert_eq!(overall_status(&reports), HealthStatus::Critical);
+    }
+
+    #[test]
+    fn any_warning_without_critical_is_amber() {
+        let reports = [
+            report("CacheMonitor", HealthStatus::Healthy),
+            report("GitMonitor", HealthStatus::Warning),
+        ];
+        assert_eq!(overall_status(&reports), HealthStatus::Warning);
+    }
+
+    #[test]
+    fn all_healthy_is_green() {
+        let reports = [
+            report("CacheMonitor", HealthStatus::Healthy),
+            report("DiskMonitor", HealthStatus::Healthy),
+        ];
+        assert_eq!(overall_status(&reports), HealthStatus::Healthy);
+        assert_eq!(
+            tooltip_for(&reports, HealthStatus::Healthy),
+            "koi — all 2 monitors healthy"
+        );
+    }
+
+    #[test]
+    fn no_reports_is_green_and_says_so() {
+        assert_eq!(overall_status(&[]), HealthStatus::Healthy);
+        assert_eq!(
+            tooltip_for(&[], HealthStatus::Healthy),
+            "koi — no monitor reports yet (run `koi check`)"
+        );
+    }
+
+    #[test]
+    fn tooltip_names_the_worst_monitor_and_its_reason() {
+        let reports = [
+            with_suggestion(
+                report("CacheMonitor", HealthStatus::Warning),
+                "3.1 GB of stale caches",
+                Severity::Warning,
+            ),
+            with_suggestion(
+                report("DiskMonitor", HealthStatus::Critical),
+                "/ is 96% full",
+                Severity::Critical,
+            ),
+        ];
+        assert_eq!(
+            tooltip_for(&reports, overall_status(&reports)),
+            "koi — DiskMonitor critical: / is 96% full"
+        );
+    }
+
+    #[test]
+    fn reason_prefers_the_suggestion_matching_the_status() {
+        let mut r = with_suggestion(
+            report("DiskMonitor", HealthStatus::Critical),
+            "informational note",
+            Severity::Info,
+        );
+        r = with_suggestion(r, "/ is 96% full", Severity::Critical);
+        assert_eq!(reason(&r).as_deref(), Some("/ is 96% full"));
+    }
+
+    #[test]
+    fn reason_falls_back_to_an_observation_key() {
+        let mut r = report("MemoryMonitor", HealthStatus::Warning);
+        r.observations.push(Observation {
+            key: "swap_pressure".into(),
+            value: serde_json::json!(0.8),
+            severity: Severity::Warning,
+        });
+        assert_eq!(reason(&r).as_deref(), Some("swap_pressure"));
+    }
+
+    #[test]
+    fn a_monitor_with_no_detail_still_gets_a_tooltip() {
+        let reports = [report("DockerMonitor", HealthStatus::Warning)];
+        assert_eq!(
+            tooltip_for(&reports, HealthStatus::Warning),
+            "koi — DockerMonitor warning"
+        );
+    }
+
+    #[test]
+    fn long_reasons_are_truncated_on_a_char_boundary() {
+        let long = "é".repeat(MAX_REASON_CHARS + 20);
+        let r = with_suggestion(
+            report("FileMonitor", HealthStatus::Warning),
+            &long,
+            Severity::Warning,
+        );
+        let why = reason(&r).expect("reason");
+        assert_eq!(why.chars().count(), MAX_REASON_CHARS);
+        assert!(why.ends_with('…'));
+    }
+
+    #[test]
+    fn every_status_icon_decodes() {
+        for status in [
+            HealthStatus::Healthy,
+            HealthStatus::Warning,
+            HealthStatus::Critical,
+        ] {
+            assert!(icon_for(status).is_ok(), "{status:?} icon failed to decode");
+        }
+    }
+
+    #[test]
+    fn refresh_interval_is_the_specified_slow_tick() {
+        assert_eq!(REFRESH_INTERVAL, Duration::from_secs(30));
+    }
 }

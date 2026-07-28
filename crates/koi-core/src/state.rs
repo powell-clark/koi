@@ -651,6 +651,54 @@ mod tests {
         assert_eq!(all[1].status, HealthStatus::Critical);
     }
 
+    /// The tray repaints off this query every 30s (TASK-KOI100), so it has to
+    /// stay cheap even once the history table has months of reports in it.
+    #[test]
+    fn latest_reports_all_stays_under_50ms_on_a_full_history() {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = open(&dir.path().join("koi.db")).unwrap();
+        let monitors = [
+            "CacheMonitor",
+            "DiskMonitor",
+            "DockerMonitor",
+            "FileMonitor",
+            "GitMonitor",
+            "MemoryMonitor",
+            "PackageMonitor",
+        ];
+        // Seven monitors x 500 runs — well past a year of daily `koi check`.
+        for _ in 0..500 {
+            for m in monitors {
+                record_monitor_report(
+                    &conn,
+                    &MonitorReport {
+                        monitor: (*m).into(),
+                        status: HealthStatus::Healthy,
+                        elapsed_ms: 12,
+                        collected_at: Utc::now(),
+                        observations: vec![Observation {
+                            key: "sample".into(),
+                            value: serde_json::json!({"bytes": 123_456_789u64}),
+                            severity: Severity::Info,
+                        }],
+                        suggestions: vec![],
+                    },
+                )
+                .unwrap();
+            }
+        }
+
+        let start = std::time::Instant::now();
+        let all = latest_reports_all(&conn).unwrap();
+        let elapsed = start.elapsed();
+
+        assert_eq!(all.len(), monitors.len());
+        assert!(
+            elapsed < std::time::Duration::from_millis(50),
+            "latest_reports_all took {elapsed:?}, budget is 50ms"
+        );
+    }
+
     #[test]
     fn proposal_upsert_is_idempotent() {
         let conn = open_in_memory().unwrap();

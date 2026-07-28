@@ -2021,6 +2021,7 @@ dependencies = [
 name = "koi-tray"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "koi-core",
  "rusqlite",
  "serde",

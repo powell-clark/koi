@@ -23,3 +23,6 @@ rusqlite.workspace = true
 
 [build-dependencies]
 tauri-build.workspace = true
+
+[dev-dependencies]
+chrono.workspace = true
