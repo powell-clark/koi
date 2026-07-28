@@ -248,6 +248,10 @@ fn toggle_popover(app: &AppHandle) {
             }
             _ => {
                 let _ = win.show();
+                // After show, not before: in setup() the window has not been
+                // realised yet and outer_size() still reports the configured
+                // size, so the clamp silently passed on a panel that actually
+                // came up nearly full-screen height.
                 let _ = win.set_focus();
             }
         }
