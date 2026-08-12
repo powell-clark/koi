@@ -14,7 +14,7 @@ use std::{
 };
 
 use crate::{
-    filing::{managed_zone, FileMonitor, Proposal, ProposedAction, ScanContext},
+    filing::{FileMonitor, Proposal, ProposedAction, ScanContext},
     Result,
 };
 
@@ -82,18 +82,6 @@ impl FileMonitor for DocumentsMonitor {
             return Ok(vec![]);
         }
 
-        // Register direct children as potential managed zones. We can't mutate
-        // ctx, so build a local zone cache on the fly.
-        let mut zones = managed_zone::ZoneCache::default();
-        if let Ok(entries) = std::fs::read_dir(&self.root) {
-            for entry in entries.filter_map(|e| e.ok()) {
-                let p = entry.path();
-                if p.is_dir() {
-                    zones.register_dir(&p);
-                }
-            }
-        }
-
         let mut proposals = Vec::new();
         let entries = match std::fs::read_dir(&self.root) {
             Ok(e) => e,
@@ -106,7 +94,7 @@ impl FileMonitor for DocumentsMonitor {
             if !meta.is_file() {
                 continue;
             }
-            if ctx.is_managed(&path) || zones.is_managed(&path) {
+            if ctx.is_managed(&path) {
                 continue;
             }
             if path
@@ -171,12 +159,35 @@ mod tests {
         fs::write(docs.join("Finance/statement.pdf"), b"x").unwrap();
 
         let mon = DocumentsMonitor::with_root(docs.clone());
-        let ctx = ScanContext::new_now();
+        let ctx = ScanContext::new_now_with_roots(std::slice::from_ref(&docs));
         let proposals = mon.scan(&ctx).unwrap();
         // Only loose.pdf from root (Finance not scanned — we're depth 1).
         // More importantly: even if we tried, Finance would be a managed zone.
         assert_eq!(proposals.len(), 1);
         assert!(proposals[0].path.ends_with("loose.pdf"));
+        fs::remove_dir_all(&docs).ok();
+    }
+
+    #[test]
+    fn honours_root_itself_being_managed_via_context() {
+        // The whole Documents root claimed by another system — a case the old
+        // per-scan local ZoneCache (which only ever registered *children* of
+        // root, never root itself) could not represent at all. Only reachable
+        // now that the shared ScanContext is populated by ZoneCache::discover,
+        // which registers the root passed in, not just its children.
+        let docs = tmp("root-managed");
+        let mut m = fs::File::create(docs.join(".koi-managed-by")).unwrap();
+        writeln!(m, "system = \"the-book\"\nscope = \"recursive\"").unwrap();
+        fs::write(docs.join("loose.pdf"), b"x").unwrap();
+
+        let mon = DocumentsMonitor::with_root(docs.clone());
+        let ctx = ScanContext::new_now_with_roots(std::slice::from_ref(&docs));
+        let proposals = mon.scan(&ctx).unwrap();
+        assert_eq!(
+            proposals.len(),
+            0,
+            "root-level managed zone must suppress every loose file under it"
+        );
         fs::remove_dir_all(&docs).ok();
     }
 }

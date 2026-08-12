@@ -194,7 +194,7 @@ fn spawn_scan_loop(
             let res = tokio::task::spawn_blocking(move || -> Result<usize> {
                 // Open a separate connection for the classifier (read-only use).
                 let classifier_conn = state::open(&db_path).context("classifier conn")?;
-                let ctx = ScanContext::new_now()
+                let ctx = ScanContext::new_now_with_roots(&monitor.roots())
                     .with_classifier(Box::new(SqliteClassifier::new(classifier_conn)));
                 let proposals = monitor.scan(&ctx).context("file scan")?;
                 let conn = db
