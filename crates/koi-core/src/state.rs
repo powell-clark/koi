@@ -454,6 +454,31 @@ pub struct PendingProposal {
     pub emitted_at: DateTime<Utc>,
 }
 
+/// Mark `pending` proposals for `monitor` whose source path no longer
+/// exists on disk as `stale` — a file already moved or deleted by some
+/// other means has nothing left for `koi approve` to act on, so the
+/// proposal stops being retried against it forever. Returns the count
+/// swept.
+pub fn supersede_stale_proposals(conn: &Connection, monitor: &str) -> Result<usize> {
+    let mut stmt =
+        conn.prepare("SELECT id, path FROM proposals WHERE monitor = ?1 AND state = 'pending'")?;
+    let rows: Vec<(String, String)> = stmt
+        .query_map(params![monitor], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<std::result::Result<_, _>>()?;
+
+    let mut count = 0;
+    for (id, path) in rows {
+        if !Path::new(&path).exists() {
+            conn.execute(
+                "UPDATE proposals SET state = 'stale' WHERE id = ?1",
+                params![id],
+            )?;
+            count += 1;
+        }
+    }
+    Ok(count)
+}
+
 // -- decisions -------------------------------------------------------------
 
 pub fn record_decision(
@@ -1091,6 +1116,79 @@ mod tests {
             elapsed < std::time::Duration::from_millis(50),
             "latest_reports_all took {elapsed:?}, budget is 50ms"
         );
+    }
+
+    #[test]
+    fn supersede_stale_proposals_marks_vanished_sources_and_leaves_existing_ones() {
+        use std::io::Write;
+        let conn = open_in_memory().unwrap();
+
+        let tmp_dir = std::env::temp_dir().join(format!(
+            "koi-stale-sweep-{:x}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .subsec_nanos()
+        ));
+        std::fs::create_dir_all(&tmp_dir).unwrap();
+        let still_here = tmp_dir.join("still-here.pdf");
+        std::fs::File::create(&still_here)
+            .unwrap()
+            .write_all(b"x")
+            .unwrap();
+        let gone = tmp_dir.join("already-gone.pdf");
+        // Deliberately never created — simulates a file moved/deleted since scan.
+
+        let p_gone = Proposal::new(
+            "TestMonitor",
+            gone.clone(),
+            ProposedAction::Move {
+                dest: PathBuf::from("/tmp/dest1"),
+            },
+            "r",
+            0.9,
+        );
+        let p_here = Proposal::new(
+            "TestMonitor",
+            still_here.clone(),
+            ProposedAction::Move {
+                dest: PathBuf::from("/tmp/dest2"),
+            },
+            "r",
+            0.9,
+        );
+        let p_other_monitor = Proposal::new(
+            "OtherMonitor",
+            gone.clone(),
+            ProposedAction::Move {
+                dest: PathBuf::from("/tmp/dest3"),
+            },
+            "r",
+            0.9,
+        );
+        upsert_proposal(&conn, &p_gone).unwrap();
+        upsert_proposal(&conn, &p_here).unwrap();
+        upsert_proposal(&conn, &p_other_monitor).unwrap();
+
+        let swept = supersede_stale_proposals(&conn, "TestMonitor").unwrap();
+        assert_eq!(swept, 1, "only the vanished TestMonitor proposal is stale");
+
+        let pending = pending_proposals(&conn).unwrap();
+        let pending_ids: Vec<_> = pending.iter().map(|p| p.id.0.clone()).collect();
+        assert!(
+            !pending_ids.contains(&p_gone.id.0),
+            "vanished source must be swept"
+        );
+        assert!(
+            pending_ids.contains(&p_here.id.0),
+            "existing source must stay pending"
+        );
+        assert!(
+            pending_ids.contains(&p_other_monitor.id.0),
+            "a different monitor's proposal for the same vanished path must be untouched"
+        );
+
+        std::fs::remove_dir_all(&tmp_dir).ok();
     }
 
     #[test]
