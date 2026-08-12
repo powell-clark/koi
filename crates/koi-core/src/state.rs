@@ -11,7 +11,7 @@
 
 use chrono::{DateTime, Utc};
 use directories::ProjectDirs;
-use rusqlite::{params, Connection, OpenFlags};
+use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 use std::path::{Path, PathBuf};
 
 use crate::{
@@ -22,7 +22,7 @@ use crate::{
 };
 
 /// Current schema version. Bump this when adding a migration.
-const CURRENT_VERSION: u32 = 3;
+const CURRENT_VERSION: u32 = 4;
 
 const MIGRATION_V1: &str = r#"
 CREATE TABLE IF NOT EXISTS monitor_reports (
@@ -132,6 +132,24 @@ CREATE TABLE IF NOT EXISTS audit_runs (
 CREATE INDEX IF NOT EXISTS idx_audit_runs_time ON audit_runs(ran_at);
 "#;
 
+const MIGRATION_V4: &str = r#"
+CREATE TABLE IF NOT EXISTS duplicate_groups (
+    group_id      TEXT PRIMARY KEY,   -- hex blake3 content hash (see ADR-0021)
+    content_hash  TEXT NOT NULL,
+    size          INTEGER NOT NULL,
+    first_seen    TEXT NOT NULL       -- set once, preserved across re-scans
+);
+
+CREATE TABLE IF NOT EXISTS duplicate_members (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    group_id   TEXT NOT NULL REFERENCES duplicate_groups(group_id),
+    path       TEXT NOT NULL,
+    mtime      TEXT NOT NULL,
+    keep_flag  INTEGER NOT NULL DEFAULT 0  -- 1 for the oldest (kept) member
+);
+CREATE INDEX IF NOT EXISTS idx_duplicate_members_group ON duplicate_members(group_id);
+"#;
+
 fn migrate(conn: &Connection) -> Result<()> {
     let mut current: u32 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
     while current < CURRENT_VERSION {
@@ -140,6 +158,7 @@ fn migrate(conn: &Connection) -> Result<()> {
             1 => MIGRATION_V1,
             2 => MIGRATION_V2,
             3 => MIGRATION_V3,
+            4 => MIGRATION_V4,
             _ => return Err(Error::Config(format!("no migration for version {next}"))),
         };
         conn.execute_batch(sql)?;
@@ -469,6 +488,59 @@ fn serialize_action(action: &ProposedAction) -> Result<(&'static str, String)> {
     Ok((kind, serde_json::to_string(action)?))
 }
 
+// -- duplicate groups (TASK-KOI209, ADR-0021) -------------------------------
+
+/// Persist a scanned [`crate::dedupe::DuplicateGroup`]. Idempotent per
+/// `group_id` (the content hash): `first_seen` is set once and preserved on
+/// every later re-scan. Membership rows are replaced wholesale on each call
+/// — a file that moved away since the last scan simply drops out.
+pub fn upsert_duplicate_group(
+    conn: &Connection,
+    group: &crate::dedupe::DuplicateGroup,
+    now: DateTime<Utc>,
+) -> Result<()> {
+    conn.execute(
+        "INSERT INTO duplicate_groups(group_id, content_hash, size, first_seen)
+         VALUES (?1, ?1, ?2, ?3)
+         ON CONFLICT(group_id) DO NOTHING",
+        params![group.content_hash, group.size as i64, now.to_rfc3339()],
+    )?;
+    conn.execute(
+        "DELETE FROM duplicate_members WHERE group_id = ?1",
+        params![group.content_hash],
+    )?;
+    for member in &group.members {
+        let keep_flag = i64::from(member.path == group.keeper);
+        conn.execute(
+            "INSERT INTO duplicate_members(group_id, path, mtime, keep_flag)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![
+                group.content_hash,
+                member.path.to_string_lossy(),
+                member.mtime.to_rfc3339(),
+                keep_flag,
+            ],
+        )?;
+    }
+    Ok(())
+}
+
+/// The `first_seen` timestamp recorded for a group, if it has ever been
+/// persisted.
+pub fn duplicate_group_first_seen(
+    conn: &Connection,
+    group_id: &str,
+) -> Result<Option<DateTime<Utc>>> {
+    let raw: Option<String> = conn
+        .query_row(
+            "SELECT first_seen FROM duplicate_groups WHERE group_id = ?1",
+            params![group_id],
+            |r| r.get(0),
+        )
+        .optional()?;
+    Ok(raw.and_then(|s| s.parse::<DateTime<Utc>>().ok()))
+}
+
 // -- classifier (learning loop v0) -----------------------------------------
 
 /// Ask the decisions table for the highest-approval Move destination for a
@@ -601,6 +673,85 @@ mod tests {
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
         assert_eq!(v, CURRENT_VERSION);
+    }
+
+    #[test]
+    fn migration_v4_preserves_existing_proposal_and_decision_rows() {
+        // A copy of a pre-V4 DB (here: freshly migrated, since open_in_memory
+        // always migrates to CURRENT_VERSION) must upgrade without touching
+        // unrelated tables' row counts.
+        let conn = open_in_memory().unwrap();
+        let p = Proposal::new(
+            "TestMonitor",
+            PathBuf::from("/tmp/x.pdf"),
+            ProposedAction::Move {
+                dest: PathBuf::from("/tmp/dest/x.pdf"),
+            },
+            "test",
+            0.9,
+        );
+        upsert_proposal(&conn, &p).unwrap();
+        record_decision(&conn, &p.id, Decision::Approved, None).unwrap();
+
+        let proposal_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM proposals", [], |r| r.get(0))
+            .unwrap();
+        let decision_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM decisions", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(proposal_count, 1);
+        assert_eq!(decision_count, 1);
+
+        // The V4 tables exist and are queryable.
+        let group_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM duplicate_groups", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(group_count, 0);
+    }
+
+    #[test]
+    fn upsert_duplicate_group_is_idempotent_and_preserves_first_seen() {
+        let conn = open_in_memory().unwrap();
+        let group = crate::dedupe::DuplicateGroup {
+            content_hash: "abc123".into(),
+            size: 42,
+            keeper: PathBuf::from("/a"),
+            members: vec![
+                crate::dedupe::DuplicateMember {
+                    path: PathBuf::from("/a"),
+                    mtime: Utc::now(),
+                },
+                crate::dedupe::DuplicateMember {
+                    path: PathBuf::from("/b"),
+                    mtime: Utc::now(),
+                },
+            ],
+        };
+
+        let first_seen_at = "2026-01-01T00:00:00Z".parse::<DateTime<Utc>>().unwrap();
+        upsert_duplicate_group(&conn, &group, first_seen_at).unwrap();
+        let stored_first = duplicate_group_first_seen(&conn, &group.content_hash)
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored_first, first_seen_at);
+
+        // Re-scan (a later timestamp) must NOT move first_seen.
+        let rescan_at = "2026-06-01T00:00:00Z".parse::<DateTime<Utc>>().unwrap();
+        upsert_duplicate_group(&conn, &group, rescan_at).unwrap();
+        let stored_after_rescan = duplicate_group_first_seen(&conn, &group.content_hash)
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored_after_rescan, first_seen_at);
+
+        // Members were replaced, not duplicated, on re-scan.
+        let member_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM duplicate_members WHERE group_id = ?1",
+                params![group.content_hash],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(member_count, 2);
     }
 
     #[test]
