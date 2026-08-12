@@ -71,7 +71,14 @@ enum Command {
         json: bool,
     },
     /// List pending filing proposals.
-    Proposals,
+    Proposals {
+        /// Only show proposals from this monitor.
+        #[arg(long)]
+        monitor: Option<String>,
+        /// Cap the number of proposals shown.
+        #[arg(long)]
+        limit: Option<usize>,
+    },
     /// Approve and execute one or all pending proposals.
     Approve {
         /// Apply every pending proposal.
@@ -87,7 +94,16 @@ enum Command {
         id: Option<String>,
     },
     /// Reject a pending proposal (records signal, does nothing on disk).
-    Reject { id: String },
+    Reject {
+        /// Proposal id (hex prefix). Required unless --all is set.
+        id: Option<String>,
+        /// Reject every pending proposal.
+        #[arg(long, conflicts_with = "id")]
+        all: bool,
+        /// With --all, only reject proposals from this monitor.
+        #[arg(long, requires = "all")]
+        monitor: Option<String>,
+    },
     /// Show recent persisted reports for a monitor.
     History {
         monitor: String,
@@ -235,14 +251,14 @@ fn main() -> Result<()> {
         } => run_backup(dry_run, include_red, status)?,
         Command::Monitor => run_monitor()?,
         Command::Scan { json } => run_scan(json)?,
-        Command::Proposals => run_proposals()?,
+        Command::Proposals { monitor, limit } => run_proposals(monitor, limit)?,
         Command::Approve {
             all,
             dry_run,
             limit,
             id,
         } => run_approve(all, dry_run, limit, id)?,
-        Command::Reject { id } => run_reject(&id)?,
+        Command::Reject { id, all, monitor } => run_reject(id, all, monitor)?,
         Command::History { monitor, limit } => run_history(&monitor, limit)?,
         Command::Stats => run_stats()?,
         Command::Completions { shell } => {
@@ -1818,6 +1834,12 @@ fn run_scan(json: bool) -> Result<()> {
         state::upsert_proposal(&conn, p).context("persist proposal")?;
     }
 
+    // Stale-proposal sweep: a pending proposal whose source has since
+    // vanished (moved/deleted some other way) stops being retried forever.
+    for m in &monitors {
+        state::supersede_stale_proposals(&conn, m.name()).context("sweep stale proposals")?;
+    }
+
     if json {
         println!("{}", serde_json::to_string_pretty(&all_proposals)?);
         return Ok(());
@@ -1859,9 +1881,15 @@ fn run_scan(json: bool) -> Result<()> {
     Ok(())
 }
 
-fn run_proposals() -> Result<()> {
+fn run_proposals(monitor: Option<String>, limit: Option<usize>) -> Result<()> {
     let conn = open_state()?;
-    let pending = state::pending_proposals(&conn).context("load pending")?;
+    let mut pending = state::pending_proposals(&conn).context("load pending")?;
+    if let Some(mon) = &monitor {
+        pending.retain(|p| &p.monitor == mon);
+    }
+    if let Some(n) = limit {
+        pending.truncate(n);
+    }
     if pending.is_empty() {
         println!("No pending proposals. Run `koi scan` first.");
         return Ok(());
@@ -1961,6 +1989,14 @@ fn run_approve(all: bool, dry_run: bool, limit: Option<usize>, id: Option<String
             }
             Outcome::Skipped(why) => {
                 skipped += 1;
+                // A skip is a terminal, recorded outcome — without this,
+                // the exact same proposal gets re-attempted and re-skipped
+                // on every future `koi approve --all` forever.
+                state::record_decision(&conn, &p.id, state::Decision::Deferred, Some(&why))?;
+                conn.execute(
+                    "UPDATE proposals SET state = 'skipped' WHERE id = ?1",
+                    rusqlite::params![p.id.0],
+                )?;
                 println!("  - {} {} (skipped: {why})", &p.id.0[..8], p.path.display());
             }
             Outcome::Failed(why) => {
@@ -1977,15 +2013,28 @@ fn run_approve(all: bool, dry_run: bool, limit: Option<usize>, id: Option<String
     Ok(())
 }
 
-fn run_reject(id_prefix: &str) -> Result<()> {
+fn run_reject(id_prefix: Option<String>, all: bool, monitor: Option<String>) -> Result<()> {
     let conn = open_state()?;
     let pending = state::pending_proposals(&conn).context("load pending")?;
-    let matches: Vec<_> = pending
-        .into_iter()
-        .filter(|p| p.id.0.starts_with(id_prefix))
-        .collect();
+
+    let matches: Vec<_> = if all {
+        pending
+            .into_iter()
+            .filter(|p| monitor.as_deref().is_none_or(|m| p.monitor == m))
+            .collect()
+    } else {
+        let Some(prefix) = id_prefix else {
+            anyhow::bail!("usage: koi reject --all [--monitor <name>] | koi reject <id-prefix>");
+        };
+        pending
+            .into_iter()
+            .filter(|p| p.id.0.starts_with(&prefix))
+            .collect()
+    };
+
     if matches.is_empty() {
-        anyhow::bail!("no pending proposal matches id prefix {id_prefix}");
+        println!("No matching pending proposals.");
+        return Ok(());
     }
     for p in &matches {
         state::record_decision(
@@ -1996,6 +2045,7 @@ fn run_reject(id_prefix: &str) -> Result<()> {
         )?;
         println!("rejected: {} {}", &p.id.0[..8], p.path.display());
     }
+    println!("{} rejected.", matches.len());
     Ok(())
 }
 
