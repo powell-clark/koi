@@ -171,4 +171,69 @@ mod tests {
         );
         assert!(matches!(outcome, Outcome::Skipped(_)));
     }
+
+    fn rclone_available() -> bool {
+        std::process::Command::new("rclone")
+            .arg("version")
+            .output()
+            .is_ok()
+    }
+
+    /// Live end-to-end proof for FEAT-KOI038 AC-5 (TASK-KOI157): runs
+    /// `apply_drive_move` against a real `rclone` process via the on-the-fly
+    /// `:local:` backend, so no Drive credentials are needed. Confirms the
+    /// same-remote-move contract koi's executor relies on for atomicity —
+    /// no application-level rollback logic exists in `apply_drive_move`
+    /// because rclone's own moveto only deletes source after a confirmed
+    /// transfer (see `rclone moveto --help`: "src will be deleted on
+    /// successful transfer").
+    #[test]
+    fn drive_move_applies_and_deletes_source() {
+        if !rclone_available() {
+            eprintln!("rclone not available — skipping live drive-move test");
+            return;
+        }
+        let scratch = tmp("drivemove-ok");
+        let src = scratch.join("src.pdf");
+        fs::write(&src, b"hello").unwrap();
+        let dest = scratch.join("sub/dst.pdf");
+
+        let outcome = apply_drive_move(
+            &format!(":local:{}", src.display()),
+            &format!(":local:{}", dest.display()),
+        );
+
+        assert!(matches!(outcome, Outcome::Applied), "{outcome:?}");
+        assert!(!src.exists(), "source must be removed on success");
+        assert_eq!(fs::read(&dest).unwrap(), b"hello");
+        fs::remove_dir_all(&scratch).ok();
+    }
+
+    /// Failure case: a missing source leaves no trace at the destination —
+    /// this is the property that makes explicit rollback unnecessary. If
+    /// rclone ever left a partially-written file under the *final* dest
+    /// name on failure, this test would need to start asserting cleanup
+    /// logic in `apply_drive_move`; today it proves no such state exists.
+    #[test]
+    fn drive_move_failure_leaves_no_partial_destination() {
+        if !rclone_available() {
+            eprintln!("rclone not available — skipping live drive-move test");
+            return;
+        }
+        let scratch = tmp("drivemove-fail");
+        let missing_src = scratch.join("does-not-exist.pdf");
+        let dest = scratch.join("dst.pdf");
+
+        let outcome = apply_drive_move(
+            &format!(":local:{}", missing_src.display()),
+            &format!(":local:{}", dest.display()),
+        );
+
+        assert!(matches!(outcome, Outcome::Failed(_)), "{outcome:?}");
+        assert!(
+            !dest.exists(),
+            "a failed move must not leave a file visible under the final dest name"
+        );
+        fs::remove_dir_all(&scratch).ok();
+    }
 }

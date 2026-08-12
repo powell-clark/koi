@@ -19,7 +19,7 @@ use serde::Deserialize;
 use std::path::PathBuf;
 
 use crate::{
-    filing::{FileMonitor, Proposal, ProposedAction, ScanContext},
+    filing::{managed_zone::MARKER_FILENAME, FileMonitor, Proposal, ProposedAction, ScanContext},
     Result,
 };
 
@@ -105,6 +105,17 @@ impl GoogleDriveMonitor {
         };
         Some(pair)
     }
+
+    /// True if `entries` (already listed at a scan root) includes a
+    /// `.koi-managed-by` marker file — mirrors the local `managed_zone`
+    /// protocol (ADR-0014) for Drive roots. The scan is flat (no
+    /// subdirectory recursion), so checking the root's own listing is
+    /// equivalent to the local `ZoneCache`'s root-level marker check.
+    fn root_is_managed(entries: &[RcloneEntry]) -> bool {
+        entries
+            .iter()
+            .any(|e| !e.is_dir && e.name == MARKER_FILENAME)
+    }
 }
 
 impl FileMonitor for GoogleDriveMonitor {
@@ -129,6 +140,14 @@ impl FileMonitor for GoogleDriveMonitor {
         let mut proposals = Vec::new();
         for scan in &self.config.scans {
             let entries = Self::list_remote(&scan.remote, &scan.path)?;
+            if Self::root_is_managed(&entries) {
+                tracing::debug!(
+                    "{}:{} carries {MARKER_FILENAME} — skipping (managed zone)",
+                    scan.remote,
+                    scan.path
+                );
+                continue;
+            }
             for entry in entries {
                 if entry.is_dir {
                     continue;
@@ -192,6 +211,81 @@ mod tests {
     fn classify_unknown_extension_returns_none() {
         assert!(GoogleDriveMonitor::classify("mystery.xyz").is_none());
         assert!(GoogleDriveMonitor::classify("noext").is_none());
+    }
+
+    #[test]
+    fn root_is_managed_true_when_marker_present() {
+        let entries: Vec<RcloneEntry> = serde_json::from_value(json!([
+            {"Path": "report.pdf", "Name": "report.pdf", "Size": 500, "IsDir": false},
+            {"Path": MARKER_FILENAME, "Name": MARKER_FILENAME, "Size": 40, "IsDir": false},
+        ]))
+        .unwrap();
+        assert!(GoogleDriveMonitor::root_is_managed(&entries));
+    }
+
+    #[test]
+    fn root_is_managed_false_without_marker() {
+        let entries: Vec<RcloneEntry> = serde_json::from_value(json!([
+            {"Path": "report.pdf", "Name": "report.pdf", "Size": 500, "IsDir": false},
+        ]))
+        .unwrap();
+        assert!(!GoogleDriveMonitor::root_is_managed(&entries));
+    }
+
+    #[test]
+    fn root_is_managed_ignores_marker_named_directory() {
+        // A directory that happens to share the marker's name is not a marker
+        // file — only a regular file with that name claims the zone.
+        let entries: Vec<RcloneEntry> = serde_json::from_value(json!([
+            {"Path": MARKER_FILENAME, "Name": MARKER_FILENAME, "Size": 0, "IsDir": true},
+        ]))
+        .unwrap();
+        assert!(!GoogleDriveMonitor::root_is_managed(&entries));
+    }
+
+    /// Live end-to-end proof, not just the pure-function unit tests above:
+    /// runs the real `scan()` path against a real `rclone` process, using
+    /// rclone's on-the-fly `:local:` backend so no Drive credentials are
+    /// needed. Skips (rather than fails) when `rclone` is unavailable, since
+    /// this is exercising the actual external tool, not a mock.
+    #[test]
+    fn scan_skips_a_managed_root_end_to_end() {
+        if !GoogleDriveMonitor::rclone_available() {
+            eprintln!("rclone not available — skipping live scan test");
+            return;
+        }
+        let dir = tmpdir();
+        std::fs::write(dir.join("report.pdf"), b"hello").unwrap();
+        std::fs::write(dir.join(MARKER_FILENAME), b"system = \"the-book\"\n").unwrap();
+
+        let monitor = GoogleDriveMonitor {
+            config: GdriveConfig {
+                scans: vec![ScanRoot {
+                    remote: ":local".into(),
+                    path: dir.to_string_lossy().into_owned(),
+                    dest_root: "dest".into(),
+                }],
+            },
+        };
+        let proposals = monitor
+            .scan(&crate::filing::ScanContext::new_now())
+            .unwrap();
+        assert!(
+            proposals.is_empty(),
+            "managed root must yield zero proposals, got {proposals:?}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    fn tmpdir() -> PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let p = std::env::temp_dir().join(format!("koi-gdrive-test-{nanos:x}"));
+        std::fs::create_dir_all(&p).unwrap();
+        p
     }
 
     #[test]
