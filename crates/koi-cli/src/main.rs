@@ -194,9 +194,11 @@ enum TrashAction {
     /// delete-shaped operation in koi. Requires --yes; without it, previews
     /// what would be removed and deletes nothing.
     Empty {
-        /// e.g. "30d", "12h" — entries trashed longer ago than this are removed.
+        /// e.g. "30d", "12h" — entries trashed longer ago than this are
+        /// removed. Defaults to `[trash] retention_days` from filing.toml
+        /// (30d) when omitted.
         #[arg(long)]
-        older_than: String,
+        older_than: Option<String>,
         /// Actually delete. Without this flag, Empty only previews.
         #[arg(long)]
         yes: bool,
@@ -987,7 +989,7 @@ fn run_trash(action: TrashAction) -> Result<()> {
     match action {
         TrashAction::List => run_trash_list(),
         TrashAction::Restore { id } => run_trash_restore(id),
-        TrashAction::Empty { older_than, yes } => run_trash_empty(&older_than, yes),
+        TrashAction::Empty { older_than, yes } => run_trash_empty(older_than, yes),
     }
 }
 
@@ -1023,8 +1025,15 @@ fn run_trash_restore(id: i64) -> Result<()> {
     Ok(())
 }
 
-fn run_trash_empty(older_than: &str, yes: bool) -> Result<()> {
-    let window = trash::parse_older_than(older_than).context("parse --older-than")?;
+fn run_trash_empty(older_than: Option<String>, yes: bool) -> Result<()> {
+    let older_than = match older_than {
+        Some(s) => s,
+        None => {
+            let cfg = FilingConfig::load();
+            format!("{}d", cfg.trash.retention_days)
+        }
+    };
+    let window = trash::parse_older_than(&older_than).context("parse --older-than")?;
     let cutoff = chrono::Utc::now() - window;
 
     let conn = open_state()?;
