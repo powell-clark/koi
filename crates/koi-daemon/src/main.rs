@@ -135,6 +135,17 @@ async fn main() -> Result<()> {
         Box::new(InboxMonitor::from_config(&filing_cfg).context("InboxMonitor init")?),
     );
 
+    // Unattended duplicate-group scan (FEAT-KOI054 AC-7). Read-only against
+    // the filesystem — never trashes anything; `koi dedupe apply`/`koi trash`
+    // stay human-initiated CLI-only.
+    spawn_dedupe_scan_loop(
+        &mut tasks,
+        Duration::from_secs(filing_cfg.dedupe.scan_interval_days * 24 * 3600),
+        db.clone(),
+        dedupe_roots(&filing_cfg)?,
+        filing_cfg.dedupe.max_size_mb * 1024 * 1024,
+    );
+
     info!("{} loop(s) spawned — awaiting SIGINT/SIGTERM", tasks.len());
 
     tokio::select! {
@@ -220,6 +231,68 @@ fn spawn_scan_loop(
                 Ok(Ok(n)) => info!(name, "scan ok, {n} proposal(s) persisted"),
                 Ok(Err(e)) => warn!(name, error = %e, "scan tick failed"),
                 Err(e) => error!(name, error = %e, "scan task panicked"),
+            }
+        }
+    });
+}
+
+/// Default dedupe roots: configured overrides, falling back to `$HOME`'s
+/// Downloads/Documents/inbox — the same set `koi dedupe scan` defaults to.
+fn dedupe_roots(cfg: &FilingConfig) -> Result<Vec<std::path::PathBuf>> {
+    let home = std::env::var_os("HOME")
+        .map(std::path::PathBuf::from)
+        .ok_or_else(|| anyhow::anyhow!("$HOME not set"))?;
+    Ok(vec![
+        cfg.roots
+            .downloads
+            .clone()
+            .unwrap_or_else(|| home.join("Downloads")),
+        cfg.roots
+            .documents
+            .clone()
+            .unwrap_or_else(|| home.join("Documents")),
+        cfg.roots
+            .inbox
+            .clone()
+            .unwrap_or_else(|| home.join("inbox")),
+    ])
+}
+
+/// Unattended duplicate-group scan (FEAT-KOI054 AC-7). Read-only against the
+/// filesystem — persists groups via `state::upsert_duplicate_group` and
+/// never calls anything trash- or delete-shaped; `koi dedupe apply`/
+/// `koi trash` stay human-initiated CLI-only.
+fn spawn_dedupe_scan_loop(
+    tasks: &mut JoinSet<()>,
+    cadence: Duration,
+    db: Arc<Mutex<Connection>>,
+    roots: Vec<std::path::PathBuf>,
+    max_size_bytes: u64,
+) {
+    tasks.spawn(async move {
+        let mut ticker = tokio::time::interval(cadence);
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            ticker.tick().await;
+            let db = db.clone();
+            let roots = roots.clone();
+            let res = tokio::task::spawn_blocking(move || -> Result<usize> {
+                let groups = koi_core::dedupe::scan(&roots, max_size_bytes);
+                let conn = db
+                    .lock()
+                    .map_err(|_| anyhow::anyhow!("db mutex poisoned"))?;
+                let now = chrono::Utc::now();
+                for g in &groups {
+                    state::upsert_duplicate_group(&conn, g, now)
+                        .context("upsert duplicate group")?;
+                }
+                Ok(groups.len())
+            })
+            .await;
+            match res {
+                Ok(Ok(n)) => info!(name = "DedupeScan", "scan ok, {n} group(s) persisted"),
+                Ok(Err(e)) => warn!(name = "DedupeScan", error = %e, "dedupe scan tick failed"),
+                Err(e) => error!(name = "DedupeScan", error = %e, "dedupe scan task panicked"),
             }
         }
     });

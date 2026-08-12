@@ -40,11 +40,16 @@ pub struct CadencesConfig {
 pub struct DedupeConfig {
     /// Files larger than this are skipped by `koi dedupe scan` (ADR-0021).
     pub max_size_mb: u64,
+    /// How often `koi-daemon` runs an unattended `dedupe::scan` (FEAT-KOI054 AC-7).
+    pub scan_interval_days: u64,
 }
 
 impl Default for DedupeConfig {
     fn default() -> Self {
-        Self { max_size_mb: 100 }
+        Self {
+            max_size_mb: 100,
+            scan_interval_days: 30,
+        }
     }
 }
 
@@ -133,6 +138,27 @@ mod tests {
         );
         let cfg = FilingConfig::load_from(&path);
         assert_eq!(cfg.dedupe.max_size_mb, 250);
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn default_dedupe_scan_interval_is_monthly() {
+        assert_eq!(FilingConfig::default().dedupe.scan_interval_days, 30);
+    }
+
+    #[test]
+    fn dedupe_scan_interval_is_overridable() {
+        let path = tmp_toml(
+            "dedupe-interval-override",
+            r#"
+            [dedupe]
+            scan_interval_days = 7
+            "#,
+        );
+        let cfg = FilingConfig::load_from(&path);
+        assert_eq!(cfg.dedupe.scan_interval_days, 7);
+        // Untouched field keeps its default alongside the override.
+        assert_eq!(cfg.dedupe.max_size_mb, 100);
         std::fs::remove_file(&path).ok();
     }
 
