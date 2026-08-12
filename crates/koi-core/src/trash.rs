@@ -24,22 +24,34 @@ pub fn default_trash_root() -> Result<PathBuf> {
     Ok(crate::state::default_data_dir()?.join("trash"))
 }
 
-/// Move `source` into `<trash_root>/<ISO-date>/<path-relative-to-home>`.
+/// Where `source` would land in trash: `<trash_root>/<ISO-date>/<path-relative-to-home>`.
 /// Falls back to the path stripped of its leading `/` if `source` is not
 /// under `home` (koi's scan roots are always under `$HOME`, so this is a
-/// defensive fallback, not the expected path).
+/// defensive fallback, not the expected path). Pure — computes a path,
+/// touches no filesystem state. Exposed so a `FileMonitor::scan` (read-only
+/// by contract) can propose a trash destination without performing the move.
+pub fn trash_destination(
+    source: &Path,
+    trash_root: &Path,
+    home: &Path,
+    now: DateTime<Utc>,
+) -> PathBuf {
+    let rel = source
+        .strip_prefix(home)
+        .unwrap_or_else(|_| source.strip_prefix("/").unwrap_or(source));
+    trash_root
+        .join(now.format("%Y-%m-%d").to_string())
+        .join(rel)
+}
+
+/// Move `source` into its computed trash destination (see [`trash_destination`]).
 pub fn move_to_trash(
     source: &Path,
     trash_root: &Path,
     home: &Path,
     now: DateTime<Utc>,
 ) -> Result<PathBuf> {
-    let rel = source
-        .strip_prefix(home)
-        .unwrap_or_else(|_| source.strip_prefix("/").unwrap_or(source));
-    let dest = trash_root
-        .join(now.format("%Y-%m-%d").to_string())
-        .join(rel);
+    let dest = trash_destination(source, trash_root, home, now);
     match executor::apply(source, &ProposedAction::Move { dest: dest.clone() }) {
         executor::Outcome::Applied => Ok(dest),
         executor::Outcome::Skipped(why) => Err(Error::Config(format!("trash move skipped: {why}"))),
@@ -99,6 +111,26 @@ mod tests {
 
     fn checksum(bytes: &[u8]) -> String {
         blake3::hash(bytes).to_hex().to_string()
+    }
+
+    #[test]
+    fn trash_destination_is_pure_and_never_touches_disk() {
+        // Extracted so RootClutterMonitor (TASK-KOI211) can compute what a
+        // trash proposal's destination WOULD be during a read-only scan,
+        // without performing the move `move_to_trash` does.
+        let home = PathBuf::from("/home/user");
+        let trash_root = PathBuf::from("/home/user/.local/share/koi/trash");
+        let now = "2026-08-12T00:00:00Z".parse::<DateTime<Utc>>().unwrap();
+        let dest = trash_destination(
+            &home.join(".claude.json.tmp.12345.abcde"),
+            &trash_root,
+            &home,
+            now,
+        );
+        assert_eq!(
+            dest,
+            trash_root.join("2026-08-12/.claude.json.tmp.12345.abcde")
+        );
     }
 
     #[test]

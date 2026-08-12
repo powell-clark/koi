@@ -33,6 +33,7 @@ pub struct CadencesConfig {
     pub downloads_hours: u64,
     pub documents_hours: u64,
     pub inbox_hours: u64,
+    pub root_clutter_hours: u64,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
@@ -62,6 +63,7 @@ impl Default for CadencesConfig {
             downloads_hours: 24,
             documents_hours: 24,
             inbox_hours: 6,
+            root_clutter_hours: 24,
         }
     }
 }
@@ -119,6 +121,7 @@ mod tests {
         assert_eq!(cfg.cadences.downloads_hours, 24);
         assert_eq!(cfg.cadences.documents_hours, 24);
         assert_eq!(cfg.cadences.inbox_hours, 6);
+        assert_eq!(cfg.cadences.root_clutter_hours, 24);
         assert_eq!(cfg.roots, RootsConfig::default());
     }
 

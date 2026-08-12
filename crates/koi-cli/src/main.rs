@@ -7,7 +7,7 @@ use koi_core::{
     dedupe,
     filing::{
         self, DocumentsMonitor, DownloadsMonitor, FileMonitor, GoogleDriveMonitor, InboxMonitor,
-        Outcome, ProposalId, ProposedAction, ScanContext, SqliteClassifier,
+        Outcome, ProposalId, ProposedAction, RootClutterMonitor, ScanContext, SqliteClassifier,
     },
     monitors::{
         BackupMonitor, CacheMonitor, DiskMonitor, DockerMonitor, GhosttyMonitor, GitMonitor,
@@ -1790,6 +1790,7 @@ fn run_scan(json: bool) -> Result<()> {
         Box::new(DownloadsMonitor::from_config(&filing_cfg).context("DownloadsMonitor init")?),
         Box::new(DocumentsMonitor::from_config(&filing_cfg).context("DocumentsMonitor init")?),
         Box::new(InboxMonitor::from_config(&filing_cfg).context("InboxMonitor init")?),
+        Box::new(RootClutterMonitor::from_config(&filing_cfg).context("RootClutterMonitor init")?),
     ];
     if let Some(gdrive) = GoogleDriveMonitor::load() {
         monitors.push(Box::new(gdrive));
@@ -1929,6 +1930,12 @@ fn run_approve(all: bool, dry_run: bool, limit: Option<usize>, id: Option<String
         return Ok(());
     }
 
+    // If an approved Move's destination lands under the trash root, record
+    // it in trash_log too — so proposal-driven trash moves (RootClutterMonitor's
+    // tmp/backup-pattern proposals) are restorable/listable via `koi trash`,
+    // not just koi dedupe apply's moves.
+    let trash_root = trash::default_trash_root().ok();
+
     let mut applied = 0usize;
     let mut skipped = 0usize;
     let mut failed = 0usize;
@@ -1944,6 +1951,12 @@ fn run_approve(all: bool, dry_run: bool, limit: Option<usize>, id: Option<String
                     "UPDATE proposals SET state = 'applied' WHERE id = ?1",
                     rusqlite::params![p.id.0],
                 )?;
+                if let (ProposedAction::Move { dest }, Some(root)) = (&action, &trash_root) {
+                    if dest.starts_with(root) {
+                        state::record_trash(&conn, &p.path, dest, chrono::Utc::now())
+                            .context("record trash entry")?;
+                    }
+                }
                 println!("  ✓ {} {}", &p.id.0[..8], p.path.display());
             }
             Outcome::Skipped(why) => {

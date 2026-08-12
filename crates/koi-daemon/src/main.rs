@@ -14,8 +14,8 @@ use anyhow::{Context, Result};
 use koi_core::{
     config::FilingConfig,
     filing::{
-        DocumentsMonitor, DownloadsMonitor, FileMonitor, InboxMonitor, ScanContext,
-        SqliteClassifier,
+        DocumentsMonitor, DownloadsMonitor, FileMonitor, InboxMonitor, RootClutterMonitor,
+        ScanContext, SqliteClassifier,
     },
     monitors::{
         CacheMonitor, DiskMonitor, DockerMonitor, GitMonitor, LatencyMonitor, MemoryMonitor,
@@ -133,6 +133,14 @@ async fn main() -> Result<()> {
         db.clone(),
         db_path.clone(),
         Box::new(InboxMonitor::from_config(&filing_cfg).context("InboxMonitor init")?),
+    );
+    spawn_scan_loop(
+        &mut tasks,
+        "RootClutterMonitor",
+        Duration::from_secs(filing_cfg.cadences.root_clutter_hours * 3600),
+        db.clone(),
+        db_path.clone(),
+        Box::new(RootClutterMonitor::from_config(&filing_cfg).context("RootClutterMonitor init")?),
     );
 
     // Unattended duplicate-group scan (FEAT-KOI054 AC-7). Read-only against
