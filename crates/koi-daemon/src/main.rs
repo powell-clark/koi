@@ -12,6 +12,7 @@
 
 use anyhow::{Context, Result};
 use koi_core::{
+    config::FilingConfig,
     filing::{
         DocumentsMonitor, DownloadsMonitor, FileMonitor, InboxMonitor, ScanContext,
         SqliteClassifier,
@@ -39,6 +40,14 @@ async fn main() -> Result<()> {
     let conn = state::open(&db_path).context("open SQLite state")?;
     let db: Arc<Mutex<Connection>> = Arc::new(Mutex::new(conn));
     info!("state ready at {}", db_path.display());
+
+    let filing_cfg = FilingConfig::load();
+    info!(
+        downloads_hours = filing_cfg.cadences.downloads_hours,
+        documents_hours = filing_cfg.cadences.documents_hours,
+        inbox_hours = filing_cfg.cadences.inbox_hours,
+        "filing config loaded"
+    );
 
     let mut tasks = JoinSet::new();
 
@@ -100,30 +109,30 @@ async fn main() -> Result<()> {
         Box::new(LatencyMonitor::new()),
     );
 
-    // File monitors — daily scan cadence per ADR-0014.
+    // File monitors — cadence from filing.toml (per ADR-0014 defaults when absent).
     spawn_scan_loop(
         &mut tasks,
         "DownloadsMonitor",
-        Duration::from_secs(24 * 3600),
+        Duration::from_secs(filing_cfg.cadences.downloads_hours * 3600),
         db.clone(),
         db_path.clone(),
-        Box::new(DownloadsMonitor::new().context("DownloadsMonitor init")?),
+        Box::new(DownloadsMonitor::from_config(&filing_cfg).context("DownloadsMonitor init")?),
     );
     spawn_scan_loop(
         &mut tasks,
         "DocumentsMonitor",
-        Duration::from_secs(24 * 3600),
+        Duration::from_secs(filing_cfg.cadences.documents_hours * 3600),
         db.clone(),
         db_path.clone(),
-        Box::new(DocumentsMonitor::new().context("DocumentsMonitor init")?),
+        Box::new(DocumentsMonitor::from_config(&filing_cfg).context("DocumentsMonitor init")?),
     );
     spawn_scan_loop(
         &mut tasks,
         "InboxMonitor",
-        Duration::from_secs(6 * 3600),
+        Duration::from_secs(filing_cfg.cadences.inbox_hours * 3600),
         db.clone(),
         db_path.clone(),
-        Box::new(InboxMonitor::new().context("InboxMonitor init")?),
+        Box::new(InboxMonitor::from_config(&filing_cfg).context("InboxMonitor init")?),
     );
 
     info!("{} loop(s) spawned — awaiting SIGINT/SIGTERM", tasks.len());

@@ -12,6 +12,7 @@ use std::{
 };
 
 use crate::{
+    config::FilingConfig,
     filing::{FileMonitor, Proposal, ProposedAction, ScanContext},
     Result,
 };
@@ -37,6 +38,26 @@ impl InboxMonitor {
             root: inbox,
             docs: documents,
         }
+    }
+
+    /// Like [`Self::new`], but a configured root override (if present) wins
+    /// over the `$HOME`-derived default.
+    pub fn from_config(cfg: &FilingConfig) -> Result<Self> {
+        let home = std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .ok_or_else(|| crate::error::Error::Config("$HOME not set".into()))?;
+        Ok(Self {
+            root: cfg
+                .roots
+                .inbox
+                .clone()
+                .unwrap_or_else(|| home.join("inbox")),
+            docs: cfg
+                .roots
+                .documents
+                .clone()
+                .unwrap_or_else(|| home.join("Documents")),
+        })
     }
 
     fn classify(&self, path: &Path, ctx: &ScanContext) -> Option<(PathBuf, &'static str, f32)> {
@@ -125,5 +146,20 @@ impl FileMonitor for InboxMonitor {
             }
         }
         Ok(proposals)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn from_config_applies_root_overrides() {
+        let mut cfg = crate::config::FilingConfig::default();
+        cfg.roots.inbox = Some(PathBuf::from("/mnt/scratch/inbox"));
+        cfg.roots.documents = Some(PathBuf::from("/mnt/scratch/Documents"));
+        let mon = InboxMonitor::from_config(&cfg).unwrap();
+        assert_eq!(mon.roots(), vec![PathBuf::from("/mnt/scratch/inbox")]);
+        assert_eq!(mon.docs, PathBuf::from("/mnt/scratch/Documents"));
     }
 }
