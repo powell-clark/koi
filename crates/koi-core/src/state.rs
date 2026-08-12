@@ -22,7 +22,7 @@ use crate::{
 };
 
 /// Current schema version. Bump this when adding a migration.
-const CURRENT_VERSION: u32 = 4;
+const CURRENT_VERSION: u32 = 5;
 
 const MIGRATION_V1: &str = r#"
 CREATE TABLE IF NOT EXISTS monitor_reports (
@@ -150,6 +150,17 @@ CREATE TABLE IF NOT EXISTS duplicate_members (
 CREATE INDEX IF NOT EXISTS idx_duplicate_members_group ON duplicate_members(group_id);
 "#;
 
+const MIGRATION_V5: &str = r#"
+CREATE TABLE IF NOT EXISTS trash_log (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    original_path  TEXT NOT NULL,
+    trash_path     TEXT NOT NULL,
+    trashed_at     TEXT NOT NULL,
+    restored_at    TEXT   -- NULL while still in trash
+);
+CREATE INDEX IF NOT EXISTS idx_trash_log_restored ON trash_log(restored_at);
+"#;
+
 fn migrate(conn: &Connection) -> Result<()> {
     let mut current: u32 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
     while current < CURRENT_VERSION {
@@ -159,6 +170,7 @@ fn migrate(conn: &Connection) -> Result<()> {
             2 => MIGRATION_V2,
             3 => MIGRATION_V3,
             4 => MIGRATION_V4,
+            5 => MIGRATION_V5,
             _ => return Err(Error::Config(format!("no migration for version {next}"))),
         };
         conn.execute_batch(sql)?;
@@ -525,6 +537,59 @@ pub fn upsert_duplicate_group(
     Ok(())
 }
 
+#[derive(Debug, Clone)]
+pub struct PersistedDuplicateMember {
+    pub path: PathBuf,
+    pub mtime: DateTime<Utc>,
+    pub keep: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct PersistedDuplicateGroup {
+    pub group_id: String,
+    pub size: i64,
+    pub first_seen: DateTime<Utc>,
+    pub members: Vec<PersistedDuplicateMember>,
+}
+
+/// Every persisted group with its members — the read side `koi dedupe apply`
+/// consumes.
+pub fn list_duplicate_groups(conn: &Connection) -> Result<Vec<PersistedDuplicateGroup>> {
+    let mut stmt = conn.prepare(
+        "SELECT group_id, size, first_seen FROM duplicate_groups ORDER BY first_seen ASC",
+    )?;
+    let groups: Vec<(String, i64, String)> = stmt
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+        .collect::<std::result::Result<_, _>>()?;
+
+    let mut result = Vec::with_capacity(groups.len());
+    for (group_id, size, first_seen_str) in groups {
+        let mut mstmt = conn
+            .prepare("SELECT path, mtime, keep_flag FROM duplicate_members WHERE group_id = ?1")?;
+        let members: Vec<PersistedDuplicateMember> = mstmt
+            .query_map(params![group_id], |r| {
+                Ok(PersistedDuplicateMember {
+                    path: PathBuf::from(r.get::<_, String>(0)?),
+                    mtime: r
+                        .get::<_, String>(1)?
+                        .parse::<DateTime<Utc>>()
+                        .unwrap_or_else(|_| Utc::now()),
+                    keep: r.get::<_, i64>(2)? != 0,
+                })
+            })?
+            .collect::<std::result::Result<_, _>>()?;
+        result.push(PersistedDuplicateGroup {
+            group_id,
+            size,
+            first_seen: first_seen_str
+                .parse::<DateTime<Utc>>()
+                .unwrap_or_else(|_| Utc::now()),
+            members,
+        });
+    }
+    Ok(result)
+}
+
 /// The `first_seen` timestamp recorded for a group, if it has ever been
 /// persisted.
 pub fn duplicate_group_first_seen(
@@ -539,6 +604,79 @@ pub fn duplicate_group_first_seen(
         )
         .optional()?;
     Ok(raw.and_then(|s| s.parse::<DateTime<Utc>>().ok()))
+}
+
+// -- trash log (TASK-KOI210, ADR-0021) --------------------------------------
+
+#[derive(Debug, Clone)]
+pub struct TrashEntry {
+    pub id: i64,
+    pub original_path: PathBuf,
+    pub trash_path: PathBuf,
+    pub trashed_at: DateTime<Utc>,
+}
+
+/// Record a completed trash move. Called after `trash::move_to_trash`
+/// succeeds — this function does not move anything itself.
+pub fn record_trash(
+    conn: &Connection,
+    original_path: &Path,
+    trash_path: &Path,
+    trashed_at: DateTime<Utc>,
+) -> Result<i64> {
+    conn.execute(
+        "INSERT INTO trash_log(original_path, trash_path, trashed_at, restored_at)
+         VALUES (?1, ?2, ?3, NULL)",
+        params![
+            original_path.to_string_lossy(),
+            trash_path.to_string_lossy(),
+            trashed_at.to_rfc3339(),
+        ],
+    )?;
+    Ok(conn.last_insert_rowid())
+}
+
+/// Mark a trash entry restored. Called after `trash::restore_from_trash`
+/// succeeds.
+pub fn mark_restored(conn: &Connection, id: i64, restored_at: DateTime<Utc>) -> Result<()> {
+    conn.execute(
+        "UPDATE trash_log SET restored_at = ?1 WHERE id = ?2",
+        params![restored_at.to_rfc3339(), id],
+    )?;
+    Ok(())
+}
+
+/// Entries still in trash (never restored), oldest first.
+pub fn list_trash(conn: &Connection) -> Result<Vec<TrashEntry>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, original_path, trash_path, trashed_at
+         FROM trash_log WHERE restored_at IS NULL ORDER BY trashed_at ASC",
+    )?;
+    let rows = stmt.query_map([], |r| {
+        Ok(TrashEntry {
+            id: r.get(0)?,
+            original_path: PathBuf::from(r.get::<_, String>(1)?),
+            trash_path: PathBuf::from(r.get::<_, String>(2)?),
+            trashed_at: r
+                .get::<_, String>(3)?
+                .parse::<DateTime<Utc>>()
+                .unwrap_or_else(|_| Utc::now()),
+        })
+    })?;
+    rows.collect::<std::result::Result<_, _>>()
+        .map_err(Error::from)
+}
+
+/// Still-trashed entries older than `cutoff` — the candidate set for
+/// `koi trash empty --older-than`.
+pub fn trash_entries_older_than(
+    conn: &Connection,
+    cutoff: DateTime<Utc>,
+) -> Result<Vec<TrashEntry>> {
+    Ok(list_trash(conn)?
+        .into_iter()
+        .filter(|e| e.trashed_at < cutoff)
+        .collect())
 }
 
 // -- classifier (learning loop v0) -----------------------------------------
@@ -710,6 +848,44 @@ mod tests {
     }
 
     #[test]
+    fn list_duplicate_groups_reconstructs_groups_with_members_and_keep_flag() {
+        let conn = open_in_memory().unwrap();
+        let group = crate::dedupe::DuplicateGroup {
+            content_hash: "def456".into(),
+            size: 10,
+            keeper: PathBuf::from("/a"),
+            members: vec![
+                crate::dedupe::DuplicateMember {
+                    path: PathBuf::from("/a"),
+                    mtime: Utc::now(),
+                },
+                crate::dedupe::DuplicateMember {
+                    path: PathBuf::from("/b"),
+                    mtime: Utc::now(),
+                },
+            ],
+        };
+        upsert_duplicate_group(&conn, &group, Utc::now()).unwrap();
+
+        let groups = list_duplicate_groups(&conn).unwrap();
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].group_id, "def456");
+        assert_eq!(groups[0].members.len(), 2);
+        let keeper_member = groups[0]
+            .members
+            .iter()
+            .find(|m| m.path == Path::new("/a"))
+            .unwrap();
+        assert!(keeper_member.keep);
+        let other_member = groups[0]
+            .members
+            .iter()
+            .find(|m| m.path == Path::new("/b"))
+            .unwrap();
+        assert!(!other_member.keep);
+    }
+
+    #[test]
     fn upsert_duplicate_group_is_idempotent_and_preserves_first_seen() {
         let conn = open_in_memory().unwrap();
         let group = crate::dedupe::DuplicateGroup {
@@ -752,6 +928,73 @@ mod tests {
             )
             .unwrap();
         assert_eq!(member_count, 2);
+    }
+
+    #[test]
+    fn migration_v5_preserves_v4_and_earlier_row_counts() {
+        let conn = open_in_memory().unwrap();
+        let p = Proposal::new(
+            "TestMonitor",
+            PathBuf::from("/tmp/x.pdf"),
+            ProposedAction::Move {
+                dest: PathBuf::from("/tmp/dest/x.pdf"),
+            },
+            "test",
+            0.9,
+        );
+        upsert_proposal(&conn, &p).unwrap();
+        let group = crate::dedupe::DuplicateGroup {
+            content_hash: "abc".into(),
+            size: 1,
+            keeper: PathBuf::from("/a"),
+            members: vec![crate::dedupe::DuplicateMember {
+                path: PathBuf::from("/a"),
+                mtime: Utc::now(),
+            }],
+        };
+        upsert_duplicate_group(&conn, &group, Utc::now()).unwrap();
+
+        let proposal_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM proposals", [], |r| r.get(0))
+            .unwrap();
+        let group_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM duplicate_groups", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(proposal_count, 1);
+        assert_eq!(group_count, 1);
+
+        let trash_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM trash_log", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(trash_count, 0);
+    }
+
+    #[test]
+    fn record_and_restore_trash_entry() {
+        let conn = open_in_memory().unwrap();
+        let now = Utc::now();
+        let id = record_trash(
+            &conn,
+            Path::new("/home/user/Downloads/dupe.pdf"),
+            Path::new("/home/user/.local/share/koi/trash/2026-08-12/Downloads/dupe.pdf"),
+            now,
+        )
+        .unwrap();
+
+        let entries = list_trash(&conn).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].id, id);
+        assert_eq!(
+            entries[0].original_path,
+            PathBuf::from("/home/user/Downloads/dupe.pdf")
+        );
+
+        mark_restored(&conn, id, Utc::now()).unwrap();
+        let entries_after = list_trash(&conn).unwrap();
+        assert!(
+            entries_after.is_empty(),
+            "a restored entry must not appear in list_trash"
+        );
     }
 
     #[test]

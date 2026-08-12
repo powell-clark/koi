@@ -14,7 +14,7 @@ use koi_core::{
         LatencyMonitor, MemoryMonitor, ModelSizeMonitor, NetworkMonitor, PackageMonitor,
         WezTermMonitor,
     },
-    notes, state,
+    notes, state, trash,
     types::HealthStatus,
     Monitor,
 };
@@ -140,6 +140,11 @@ enum Command {
         #[command(subcommand)]
         action: DedupeAction,
     },
+    /// Manage koi's reversible trash (see ADR-0021).
+    Trash {
+        #[command(subcommand)]
+        action: TrashAction,
+    },
 }
 
 #[derive(Subcommand)]
@@ -149,6 +154,36 @@ enum DedupeAction {
         /// Roots to search (defaults to configured/`$HOME` Downloads, Documents, inbox).
         #[arg(long)]
         root: Vec<std::path::PathBuf>,
+    },
+    /// Move every non-keeper member of one or more persisted groups to trash.
+    Apply {
+        /// Group id (hex prefix, matching a `koi dedupe scan` result).
+        group: Option<String>,
+        /// Apply to every persisted group.
+        #[arg(long, conflicts_with = "group")]
+        all_groups: bool,
+        /// Show what would move without touching anything.
+        #[arg(long)]
+        dry_run: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum TrashAction {
+    /// List entries currently in trash (never restored).
+    List,
+    /// Restore a trash entry to its original path.
+    Restore { id: i64 },
+    /// Permanently delete trash entries older than a window — the only
+    /// delete-shaped operation in koi. Requires --yes; without it, previews
+    /// what would be removed and deletes nothing.
+    Empty {
+        /// e.g. "30d", "12h" — entries trashed longer ago than this are removed.
+        #[arg(long)]
+        older_than: String,
+        /// Actually delete. Without this flag, Empty only previews.
+        #[arg(long)]
+        yes: bool,
     },
 }
 
@@ -230,6 +265,7 @@ fn main() -> Result<()> {
         Command::Paths => run_paths()?,
         Command::Notes { action } => run_notes(action)?,
         Command::Dedupe { action } => run_dedupe(action)?,
+        Command::Trash { action } => run_trash(action)?,
     }
     Ok(())
 }
@@ -781,6 +817,11 @@ fn run_zones(custom_roots: Vec<std::path::PathBuf>) -> Result<()> {
 fn run_dedupe(action: DedupeAction) -> Result<()> {
     match action {
         DedupeAction::Scan { root } => run_dedupe_scan(root),
+        DedupeAction::Apply {
+            group,
+            all_groups,
+            dry_run,
+        } => run_dedupe_apply(group, all_groups, dry_run),
     }
 }
 
@@ -858,6 +899,158 @@ fn run_dedupe_scan(custom_roots: Vec<std::path::PathBuf>) -> Result<()> {
             println!("    {marker}  {}", member.path.display());
         }
     }
+    Ok(())
+}
+
+fn run_dedupe_apply(group_prefix: Option<String>, all_groups: bool, dry_run: bool) -> Result<()> {
+    if !all_groups && group_prefix.is_none() {
+        anyhow::bail!("usage: koi dedupe apply --all-groups | koi dedupe apply <group-id-prefix>");
+    }
+
+    let conn = open_state()?;
+    let groups = state::list_duplicate_groups(&conn).context("load duplicate groups")?;
+    let matching: Vec<_> = if all_groups {
+        groups
+    } else {
+        let prefix = group_prefix.expect("checked above");
+        groups
+            .into_iter()
+            .filter(|g| g.group_id.starts_with(&prefix))
+            .collect()
+    };
+
+    if matching.is_empty() {
+        println!("No matching duplicate groups. Run `koi dedupe scan` first.");
+        return Ok(());
+    }
+
+    let non_keepers: Vec<_> = matching
+        .iter()
+        .flat_map(|g| g.members.iter().filter(|m| !m.keep))
+        .collect();
+
+    if dry_run {
+        println!(
+            "DRY RUN — {} file(s) across {} group(s) would move to trash:",
+            non_keepers.len(),
+            matching.len()
+        );
+        for m in &non_keepers {
+            println!("  {}", m.path.display());
+        }
+        return Ok(());
+    }
+
+    let home = std::env::var_os("HOME")
+        .map(std::path::PathBuf::from)
+        .ok_or_else(|| anyhow::anyhow!("$HOME not set"))?;
+    let trash_root = trash::default_trash_root()?;
+    let now = chrono::Utc::now();
+
+    let mut moved = 0usize;
+    let mut skipped = 0usize;
+    for m in &non_keepers {
+        match trash::move_to_trash(&m.path, &trash_root, &home, now) {
+            Ok(trash_path) => {
+                state::record_trash(&conn, &m.path, &trash_path, now)
+                    .context("record trash entry")?;
+                println!("  trashed  {}", m.path.display());
+                moved += 1;
+            }
+            Err(e) => {
+                println!("  skipped  {} ({e})", m.path.display());
+                skipped += 1;
+            }
+        }
+    }
+    println!("{moved} moved to trash, {skipped} skipped.");
+    Ok(())
+}
+
+fn run_trash(action: TrashAction) -> Result<()> {
+    match action {
+        TrashAction::List => run_trash_list(),
+        TrashAction::Restore { id } => run_trash_restore(id),
+        TrashAction::Empty { older_than, yes } => run_trash_empty(&older_than, yes),
+    }
+}
+
+fn run_trash_list() -> Result<()> {
+    let conn = open_state()?;
+    let entries = state::list_trash(&conn).context("list trash")?;
+    if entries.is_empty() {
+        println!("Trash is empty.");
+        return Ok(());
+    }
+    println!("{} entry(ies) in trash:", entries.len());
+    for e in &entries {
+        println!(
+            "  [{}] {}  (trashed {})",
+            e.id,
+            e.original_path.display(),
+            e.trashed_at.to_rfc3339()
+        );
+    }
+    Ok(())
+}
+
+fn run_trash_restore(id: i64) -> Result<()> {
+    let conn = open_state()?;
+    let entries = state::list_trash(&conn).context("list trash")?;
+    let Some(entry) = entries.into_iter().find(|e| e.id == id) else {
+        anyhow::bail!("no trash entry with id {id} (or it was already restored)");
+    };
+    trash::restore_from_trash(&entry.trash_path, &entry.original_path)
+        .context("restore from trash")?;
+    state::mark_restored(&conn, id, chrono::Utc::now()).context("mark restored")?;
+    println!("Restored {}", entry.original_path.display());
+    Ok(())
+}
+
+fn run_trash_empty(older_than: &str, yes: bool) -> Result<()> {
+    let window = trash::parse_older_than(older_than).context("parse --older-than")?;
+    let cutoff = chrono::Utc::now() - window;
+
+    let conn = open_state()?;
+    let candidates = state::trash_entries_older_than(&conn, cutoff).context("list candidates")?;
+
+    if candidates.is_empty() {
+        println!("Nothing older than {older_than} in trash.");
+        return Ok(());
+    }
+
+    if !yes {
+        println!(
+            "{} entry(ies) older than {older_than} would be permanently deleted:",
+            candidates.len()
+        );
+        for e in &candidates {
+            println!("  [{}] {}", e.id, e.original_path.display());
+        }
+        println!("Re-run with --yes to actually delete. Nothing was removed.");
+        return Ok(());
+    }
+
+    let mut deleted = 0usize;
+    let mut failed = 0usize;
+    for e in &candidates {
+        match std::fs::remove_file(&e.trash_path) {
+            Ok(()) => {
+                // Reusing mark_restored/restored_at here: the column means
+                // "no longer an active trash item", which covers both a
+                // restore and a permanent deletion — trash_log has no
+                // separate purged_at per ADR-0021's schema.
+                state::mark_restored(&conn, e.id, chrono::Utc::now())
+                    .context("mark trash entry cleared")?;
+                deleted += 1;
+            }
+            Err(err) => {
+                println!("  failed to delete {}: {err}", e.trash_path.display());
+                failed += 1;
+            }
+        }
+    }
+    println!("{deleted} permanently deleted, {failed} failed.");
     Ok(())
 }
 
