@@ -17,6 +17,7 @@ pub struct FilingConfig {
     pub roots: RootsConfig,
     pub cadences: CadencesConfig,
     pub dedupe: DedupeConfig,
+    pub trash: TrashConfig,
 }
 
 #[derive(Debug, Clone, Deserialize, Default, PartialEq, Eq)]
@@ -51,6 +52,21 @@ impl Default for DedupeConfig {
             max_size_mb: 100,
             scan_interval_days: 30,
         }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct TrashConfig {
+    /// Default `koi trash empty --older-than` window when the flag is
+    /// omitted. Never applied automatically — `trash empty` is always a
+    /// human-initiated CLI invocation (ADR-0021).
+    pub retention_days: u64,
+}
+
+impl Default for TrashConfig {
+    fn default() -> Self {
+        Self { retention_days: 30 }
     }
 }
 
@@ -162,6 +178,25 @@ mod tests {
         assert_eq!(cfg.dedupe.scan_interval_days, 7);
         // Untouched field keeps its default alongside the override.
         assert_eq!(cfg.dedupe.max_size_mb, 100);
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn default_trash_retention_is_monthly() {
+        assert_eq!(FilingConfig::default().trash.retention_days, 30);
+    }
+
+    #[test]
+    fn trash_retention_is_overridable() {
+        let path = tmp_toml(
+            "trash-retention-override",
+            r#"
+            [trash]
+            retention_days = 14
+            "#,
+        );
+        let cfg = FilingConfig::load_from(&path);
+        assert_eq!(cfg.trash.retention_days, 14);
         std::fs::remove_file(&path).ok();
     }
 
