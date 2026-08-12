@@ -41,6 +41,7 @@ rayon = "1"
 byte-unit = "5"
 git2 = { version = "0.19", default-features = false, features = ["vendored-libgit2"] }
 toml = "0.8"
+blake3 = "1"
 
 # Tauri v2 for system tray application
 tauri = { version = "2.11", features = ["macos-private-api", "tray-icon", "image-png"] }

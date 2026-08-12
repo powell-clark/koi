@@ -6,6 +6,7 @@
 pub mod backup_convergence;
 pub mod cleaners;
 pub mod config;
+pub mod dedupe;
 pub mod error;
 pub mod filing;
 pub mod fs_size;

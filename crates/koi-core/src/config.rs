@@ -16,6 +16,7 @@ use std::path::{Path, PathBuf};
 pub struct FilingConfig {
     pub roots: RootsConfig,
     pub cadences: CadencesConfig,
+    pub dedupe: DedupeConfig,
 }
 
 #[derive(Debug, Clone, Deserialize, Default, PartialEq, Eq)]
@@ -32,6 +33,19 @@ pub struct CadencesConfig {
     pub downloads_hours: u64,
     pub documents_hours: u64,
     pub inbox_hours: u64,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct DedupeConfig {
+    /// Files larger than this are skipped by `koi dedupe scan` (ADR-0021).
+    pub max_size_mb: u64,
+}
+
+impl Default for DedupeConfig {
+    fn default() -> Self {
+        Self { max_size_mb: 100 }
+    }
 }
 
 impl Default for CadencesConfig {
@@ -101,6 +115,25 @@ mod tests {
         assert_eq!(cfg.cadences.documents_hours, 24);
         assert_eq!(cfg.cadences.inbox_hours, 6);
         assert_eq!(cfg.roots, RootsConfig::default());
+    }
+
+    #[test]
+    fn default_dedupe_max_size_matches_adr_0021() {
+        assert_eq!(FilingConfig::default().dedupe.max_size_mb, 100);
+    }
+
+    #[test]
+    fn dedupe_max_size_is_overridable() {
+        let path = tmp_toml(
+            "dedupe-override",
+            r#"
+            [dedupe]
+            max_size_mb = 250
+            "#,
+        );
+        let cfg = FilingConfig::load_from(&path);
+        assert_eq!(cfg.dedupe.max_size_mb, 250);
+        std::fs::remove_file(&path).ok();
     }
 
     #[test]

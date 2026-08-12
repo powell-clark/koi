@@ -4,6 +4,7 @@ use clap_complete::{generate, Shell};
 use koi_core::{
     cleaners,
     config::FilingConfig,
+    dedupe,
     filing::{
         self, DocumentsMonitor, DownloadsMonitor, FileMonitor, GoogleDriveMonitor, InboxMonitor,
         Outcome, ProposalId, ProposedAction, ScanContext, SqliteClassifier,
@@ -134,6 +135,21 @@ enum Command {
         #[command(subcommand)]
         action: NotesAction,
     },
+    /// Find and persist duplicate-file groups (read-only; see ADR-0021).
+    Dedupe {
+        #[command(subcommand)]
+        action: DedupeAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum DedupeAction {
+    /// Scan for cross-root duplicate-content groups (never mutates files).
+    Scan {
+        /// Roots to search (defaults to configured/`$HOME` Downloads, Documents, inbox).
+        #[arg(long)]
+        root: Vec<std::path::PathBuf>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -213,6 +229,7 @@ fn main() -> Result<()> {
         Command::Timers { action } => run_timers(action)?,
         Command::Paths => run_paths()?,
         Command::Notes { action } => run_notes(action)?,
+        Command::Dedupe { action } => run_dedupe(action)?,
     }
     Ok(())
 }
@@ -756,6 +773,89 @@ fn run_zones(custom_roots: Vec<std::path::PathBuf>) -> Result<()> {
         println!("    scope:  {:?}", z.scope);
         if let Some(contact) = &z.contact {
             println!("    contact: {contact}");
+        }
+    }
+    Ok(())
+}
+
+fn run_dedupe(action: DedupeAction) -> Result<()> {
+    match action {
+        DedupeAction::Scan { root } => run_dedupe_scan(root),
+    }
+}
+
+fn run_dedupe_scan(custom_roots: Vec<std::path::PathBuf>) -> Result<()> {
+    let filing_cfg = FilingConfig::load();
+
+    let roots = if !custom_roots.is_empty() {
+        custom_roots
+    } else {
+        let home = std::env::var_os("HOME")
+            .map(std::path::PathBuf::from)
+            .ok_or_else(|| anyhow::anyhow!("$HOME not set"))?;
+        vec![
+            filing_cfg
+                .roots
+                .downloads
+                .clone()
+                .unwrap_or_else(|| home.join("Downloads")),
+            filing_cfg
+                .roots
+                .documents
+                .clone()
+                .unwrap_or_else(|| home.join("Documents")),
+            filing_cfg
+                .roots
+                .inbox
+                .clone()
+                .unwrap_or_else(|| home.join("inbox")),
+        ]
+    };
+    let roots: Vec<_> = roots.into_iter().filter(|r| r.exists()).collect();
+    if roots.is_empty() {
+        println!("No existing roots to scan.");
+        return Ok(());
+    }
+
+    let max_size_bytes = filing_cfg.dedupe.max_size_mb * 1024 * 1024;
+    let groups = dedupe::scan(&roots, max_size_bytes);
+
+    let conn = open_state()?;
+    let now = chrono::Utc::now();
+    for group in &groups {
+        state::upsert_duplicate_group(&conn, group, now).context("persist duplicate group")?;
+    }
+
+    if groups.is_empty() {
+        println!(
+            "No duplicate groups found across {} root(s) (max size {}).",
+            roots.len(),
+            human(max_size_bytes)
+        );
+        return Ok(());
+    }
+
+    let reclaimable = dedupe::reclaimable_bytes(&groups);
+    println!(
+        "{} duplicate group(s) found, {} reclaimable if every non-keeper is trashed:",
+        groups.len(),
+        human(reclaimable)
+    );
+    for group in &groups {
+        println!(
+            "  [{}] {} × {} — keep {}",
+            &group.content_hash[..8],
+            group.members.len(),
+            human(group.size),
+            group.keeper.display()
+        );
+        for member in &group.members {
+            let marker = if member.path == group.keeper {
+                "keep"
+            } else {
+                "dupe"
+            };
+            println!("    {marker}  {}", member.path.display());
         }
     }
     Ok(())
