@@ -1496,9 +1496,13 @@ fn run_scan(json: bool) -> Result<()> {
     }
 
     // Build scan context with a classifier reading from the DB (learning loop).
+    // Zone cache is discovered up front over every monitor's roots so managed
+    // zones (.koi-managed-by) are honoured for all of them, not just whichever
+    // monitor happens to build its own local cache.
+    let roots: Vec<_> = monitors.iter().flat_map(|m| m.roots()).collect();
     let classifier_conn = open_state()?;
-    let ctx =
-        ScanContext::new_now().with_classifier(Box::new(SqliteClassifier::new(classifier_conn)));
+    let ctx = ScanContext::new_now_with_roots(&roots)
+        .with_classifier(Box::new(SqliteClassifier::new(classifier_conn)));
 
     let mut all_proposals = Vec::new();
     for m in &monitors {

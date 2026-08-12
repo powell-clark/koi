@@ -69,6 +69,20 @@ impl ScanContext {
         }
     }
 
+    /// Like [`ScanContext::new_now`], but the zone cache is populated by
+    /// discovering `.koi-managed-by` markers under `roots` (and their direct
+    /// children) up front — so every monitor sharing this context sees the
+    /// same managed zones, not just the one monitor that happened to walk
+    /// into a marked directory. Pass the union of every monitor's
+    /// [`FileMonitor::roots`] for the scan session this context serves.
+    pub fn new_now_with_roots(roots: &[PathBuf]) -> Self {
+        Self {
+            now: chrono::Utc::now(),
+            zone_cache: managed_zone::ZoneCache::discover(roots),
+            classifier: None,
+        }
+    }
+
     pub fn with_classifier(mut self, c: Box<dyn Classifier>) -> Self {
         self.classifier = Some(c);
         self
@@ -77,5 +91,35 @@ impl ScanContext {
     /// Returns true if `path` is under a managed zone and should be skipped.
     pub fn is_managed(&self, path: &std::path::Path) -> bool {
         self.zone_cache.is_managed(path)
+    }
+}
+
+#[cfg(test)]
+mod scan_context_tests {
+    use super::*;
+
+    #[test]
+    fn new_now_with_roots_populates_zone_cache() {
+        use std::io::Write;
+        let root = std::env::temp_dir().join(format!(
+            "koi-scanctx-{:x}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .subsec_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let mut f = std::fs::File::create(root.join(managed_zone::MARKER_FILENAME)).unwrap();
+        writeln!(f, "system = \"the-book\"\nscope = \"recursive\"").unwrap();
+
+        let ctx = ScanContext::new_now_with_roots(std::slice::from_ref(&root));
+        assert!(ctx.is_managed(&root.join("x.pdf")));
+
+        // Sanity: the plain constructor stays empty — no surprise behaviour
+        // change for the many existing tests that call it directly.
+        let empty_ctx = ScanContext::new_now();
+        assert!(!empty_ctx.is_managed(&root.join("x.pdf")));
+
+        std::fs::remove_dir_all(&root).ok();
     }
 }
