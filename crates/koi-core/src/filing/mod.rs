@@ -12,6 +12,7 @@ pub mod gdrive;
 pub mod inbox;
 pub mod managed_zone;
 pub mod proposal;
+pub mod root_clutter;
 
 pub use classifier::{Classifier, SqliteClassifier};
 pub use documents::DocumentsMonitor;
@@ -21,6 +22,7 @@ pub use gdrive::GoogleDriveMonitor;
 pub use inbox::InboxMonitor;
 pub use managed_zone::{load_zone, ManagedZone};
 pub use proposal::{AutonomyTier, Proposal, ProposalId, ProposedAction};
+pub use root_clutter::RootClutterMonitor;
 
 use crate::Result;
 use std::{path::PathBuf, time::Duration};
