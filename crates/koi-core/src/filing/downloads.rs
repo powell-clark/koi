@@ -14,6 +14,7 @@ use std::{
 };
 
 use crate::{
+    config::FilingConfig,
     filing::{FileMonitor, Proposal, ProposedAction, ScanContext},
     Result,
 };
@@ -41,6 +42,26 @@ impl DownloadsMonitor {
             root: downloads,
             docs: documents,
         }
+    }
+
+    /// Like [`Self::new`], but a configured root override (if present) wins
+    /// over the `$HOME`-derived default.
+    pub fn from_config(cfg: &FilingConfig) -> Result<Self> {
+        let home = std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .ok_or_else(|| crate::error::Error::Config("$HOME not set".into()))?;
+        Ok(Self {
+            root: cfg
+                .roots
+                .downloads
+                .clone()
+                .unwrap_or_else(|| home.join("Downloads")),
+            docs: cfg
+                .roots
+                .documents
+                .clone()
+                .unwrap_or_else(|| home.join("Documents")),
+        })
     }
 
     fn classify(&self, path: &Path, ctx: &ScanContext) -> Option<(PathBuf, &'static str, f32)> {
@@ -151,6 +172,20 @@ mod tests {
         let p = std::env::temp_dir().join(format!("koi-dl-{prefix}-{nanos:x}"));
         fs::create_dir_all(&p).unwrap();
         p
+    }
+
+    #[test]
+    fn from_config_applies_root_override_and_falls_back_when_unset() {
+        // Does not mutate $HOME (process-global, unsafe under parallel test
+        // execution) — asserts the override wins, and that an unset field
+        // still resolves to *some* $HOME-derived Documents path rather than
+        // asserting the exact value of whatever $HOME happens to be here.
+        let mut cfg = crate::config::FilingConfig::default();
+        cfg.roots.downloads = Some(PathBuf::from("/mnt/scratch/Downloads"));
+        // roots.documents left unset — should fall back to $HOME/Documents.
+        let mon = DownloadsMonitor::from_config(&cfg).unwrap();
+        assert_eq!(mon.roots(), vec![PathBuf::from("/mnt/scratch/Downloads")]);
+        assert!(mon.docs.ends_with("Documents"));
     }
 
     #[test]

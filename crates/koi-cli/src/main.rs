@@ -3,6 +3,7 @@ use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::{generate, Shell};
 use koi_core::{
     cleaners,
+    config::FilingConfig,
     filing::{
         self, DocumentsMonitor, DownloadsMonitor, FileMonitor, GoogleDriveMonitor, InboxMonitor,
         Outcome, ProposalId, ProposedAction, ScanContext, SqliteClassifier,
@@ -1486,10 +1487,11 @@ fn open_state() -> Result<rusqlite::Connection> {
 }
 
 fn run_scan(json: bool) -> Result<()> {
+    let filing_cfg = FilingConfig::load();
     let mut monitors: Vec<Box<dyn FileMonitor>> = vec![
-        Box::new(DownloadsMonitor::new().context("DownloadsMonitor init")?),
-        Box::new(DocumentsMonitor::new().context("DocumentsMonitor init")?),
-        Box::new(InboxMonitor::new().context("InboxMonitor init")?),
+        Box::new(DownloadsMonitor::from_config(&filing_cfg).context("DownloadsMonitor init")?),
+        Box::new(DocumentsMonitor::from_config(&filing_cfg).context("DocumentsMonitor init")?),
+        Box::new(InboxMonitor::from_config(&filing_cfg).context("InboxMonitor init")?),
     ];
     if let Some(gdrive) = GoogleDriveMonitor::load() {
         monitors.push(Box::new(gdrive));

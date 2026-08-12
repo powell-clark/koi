@@ -14,6 +14,7 @@ use std::{
 };
 
 use crate::{
+    config::FilingConfig,
     filing::{managed_zone, FileMonitor, Proposal, ProposedAction, ScanContext},
     Result,
 };
@@ -34,6 +35,21 @@ impl DocumentsMonitor {
 
     pub fn with_root(root: PathBuf) -> Self {
         Self { root }
+    }
+
+    /// Like [`Self::new`], but a configured root override (if present) wins
+    /// over the `$HOME`-derived default.
+    pub fn from_config(cfg: &FilingConfig) -> Result<Self> {
+        let home = std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .ok_or_else(|| crate::error::Error::Config("$HOME not set".into()))?;
+        Ok(Self {
+            root: cfg
+                .roots
+                .documents
+                .clone()
+                .unwrap_or_else(|| home.join("Documents")),
+        })
     }
 
     fn classify(&self, path: &Path, ctx: &ScanContext) -> Option<(PathBuf, &'static str, f32)> {
@@ -144,6 +160,14 @@ mod tests {
         let p = std::env::temp_dir().join(format!("koi-docs-{prefix}-{nanos:x}"));
         fs::create_dir_all(&p).unwrap();
         p
+    }
+
+    #[test]
+    fn from_config_applies_root_override() {
+        let mut cfg = crate::config::FilingConfig::default();
+        cfg.roots.documents = Some(PathBuf::from("/mnt/scratch/Documents"));
+        let mon = DocumentsMonitor::from_config(&cfg).unwrap();
+        assert_eq!(mon.roots(), vec![PathBuf::from("/mnt/scratch/Documents")]);
     }
 
     #[test]
