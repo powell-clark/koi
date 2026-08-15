@@ -1139,11 +1139,13 @@ fn run_clean(dry_run: bool) -> Result<()> {
     }
 
     let mut freed = 0u64;
+    let mut cleaned = Vec::<String>::new();
     let mut failed = Vec::<(String, String)>::new();
     for (target, path, _, size) in &to_clean {
         match cleaners::execute_target(path) {
             Ok(()) => {
                 freed += size;
+                cleaned.push(target.name.to_string());
                 println!("  ✓ {}", target.name);
             }
             Err(e) => {
@@ -1157,7 +1159,53 @@ fn run_clean(dry_run: bool) -> Result<()> {
         println!("Failures: {}", failed.len());
     }
 
+    if let Err(e) = record_clean_worklog(freed, &cleaned, &failed) {
+        eprintln!("  (worklog not recorded: {e})");
+    }
+
     print_clean_proposals();
+    Ok(())
+}
+
+/// Build the worklog title and change lines for one `koi clean` run — pulled
+/// out of `run_clean` so it can be tested without touching the filesystem.
+fn clean_worklog_summary(
+    freed: u64,
+    cleaned: &[String],
+    failed: &[(String, String)],
+) -> (String, Vec<String>) {
+    let title = if failed.is_empty() {
+        format!(
+            "koi clean freed {} across {} target(s)",
+            human(freed),
+            cleaned.len()
+        )
+    } else {
+        format!(
+            "koi clean freed {} across {} target(s), {} failed",
+            human(freed),
+            cleaned.len(),
+            failed.len()
+        )
+    };
+    let mut changes: Vec<String> = cleaned
+        .iter()
+        .map(|name| format!("cleared {name}"))
+        .collect();
+    changes.extend(
+        failed
+            .iter()
+            .map(|(name, err)| format!("failed: {name} ({err})")),
+    );
+    (title, changes)
+}
+
+/// Record one executed `koi clean` run to the shared worklog (TASK-KOI190) so
+/// non-dry-run cleanup is auditable the same way manual sweeps already are.
+fn record_clean_worklog(freed: u64, cleaned: &[String], failed: &[(String, String)]) -> Result<()> {
+    let (title, changes) = clean_worklog_summary(freed, cleaned, failed);
+    let path = koi_core::worklog::worklog_path()?;
+    koi_core::worklog::append(&path, "koi-cli", &title, None, "maintenance", changes)?;
     Ok(())
 }
 
@@ -2261,5 +2309,44 @@ mod backup_exclude_tests {
     #[test]
     fn rclone_exclude_arg_passes_through_file_pattern() {
         assert_eq!(rclone_exclude_arg("**/.env"), "**/.env");
+    }
+}
+
+#[cfg(test)]
+mod clean_worklog_tests {
+    use super::*;
+
+    #[test]
+    fn all_succeeded_summary_has_no_failure_mention() {
+        let (title, changes) = clean_worklog_summary(
+            5_368_709_120, // 5G
+            &["huggingface cache".to_string(), "npm cache".to_string()],
+            &[],
+        );
+        assert_eq!(title, "koi clean freed 5.0G across 2 target(s)");
+        assert_eq!(
+            changes,
+            vec![
+                "cleared huggingface cache".to_string(),
+                "cleared npm cache".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn failures_are_named_in_title_and_changes() {
+        let (title, changes) = clean_worklog_summary(
+            1024,
+            &["npm cache".to_string()],
+            &[("docker layer".to_string(), "permission denied".to_string())],
+        );
+        assert_eq!(title, "koi clean freed 1.0K across 1 target(s), 1 failed");
+        assert_eq!(
+            changes,
+            vec![
+                "cleared npm cache".to_string(),
+                "failed: docker layer (permission denied)".to_string(),
+            ]
+        );
     }
 }

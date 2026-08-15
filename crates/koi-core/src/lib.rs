@@ -17,6 +17,7 @@ pub mod sensors;
 pub mod state;
 pub mod trash;
 pub mod types;
+pub mod worklog;
 
 pub use error::{Error, Result};
 pub use monitor::Monitor;
