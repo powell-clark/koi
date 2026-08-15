@@ -48,9 +48,7 @@ impl Default for ModelSizeMonitor {
 
 impl ModelSizeMonitor {
     pub fn new() -> Self {
-        let home = std::env::var_os("HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from("/"));
+        let home = crate::state::home_dir().unwrap_or_else(|_| PathBuf::from("/"));
         Self { home }
     }
 

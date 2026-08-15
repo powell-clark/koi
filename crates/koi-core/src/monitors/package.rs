@@ -42,9 +42,7 @@ pub struct PackageMonitor {
 
 impl PackageMonitor {
     pub fn new() -> Result<Self> {
-        let home = std::env::var_os("HOME")
-            .map(PathBuf::from)
-            .ok_or_else(|| crate::error::Error::Config("$HOME not set".into()))?;
+        let home = crate::state::home_dir()?;
         let cache_path = home.join(".cache/koi/package-monitor.json");
         if let Some(parent) = cache_path.parent() {
             fs::create_dir_all(parent)?;

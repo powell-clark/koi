@@ -25,9 +25,7 @@ pub struct DocumentsMonitor {
 
 impl DocumentsMonitor {
     pub fn new() -> Result<Self> {
-        let home = std::env::var_os("HOME")
-            .map(PathBuf::from)
-            .ok_or_else(|| crate::error::Error::Config("$HOME not set".into()))?;
+        let home = crate::state::home_dir()?;
         Ok(Self {
             root: home.join("Documents"),
         })
@@ -40,9 +38,7 @@ impl DocumentsMonitor {
     /// Like [`Self::new`], but a configured root override (if present) wins
     /// over the `$HOME`-derived default.
     pub fn from_config(cfg: &FilingConfig) -> Result<Self> {
-        let home = std::env::var_os("HOME")
-            .map(PathBuf::from)
-            .ok_or_else(|| crate::error::Error::Config("$HOME not set".into()))?;
+        let home = crate::state::home_dir()?;
         Ok(Self {
             root: cfg
                 .roots

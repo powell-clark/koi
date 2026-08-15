@@ -68,7 +68,7 @@ pub struct DiskMonitor {
 
 impl DiskMonitor {
     pub fn new() -> Result<Self> {
-        let home = dirs_home()?;
+        let home = crate::state::home_dir()?;
         let cache_path = home.join(".cache/koi/disk-cache.json");
         if let Some(parent) = cache_path.parent() {
             fs::create_dir_all(parent)?;
@@ -217,10 +217,4 @@ fn unix_now() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
-}
-
-fn dirs_home() -> Result<PathBuf> {
-    std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .ok_or_else(|| crate::error::Error::Config("$HOME not set".into()))
 }

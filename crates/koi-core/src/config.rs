@@ -88,9 +88,9 @@ impl FilingConfig {
     /// Load from `$HOME/.config/koi/filing.toml`. `$HOME` unset behaves the
     /// same as a missing file: compiled defaults, no warning.
     pub fn load() -> Self {
-        match std::env::var_os("HOME") {
-            Some(home) => Self::load_from(&PathBuf::from(home).join(".config/koi/filing.toml")),
-            None => Self::default(),
+        match crate::state::home_dir() {
+            Ok(home) => Self::load_from(&home.join(".config/koi/filing.toml")),
+            Err(_) => Self::default(),
         }
     }
 

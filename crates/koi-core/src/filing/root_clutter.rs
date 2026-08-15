@@ -29,9 +29,7 @@ pub struct RootClutterMonitor {
 
 impl RootClutterMonitor {
     pub fn new() -> Result<Self> {
-        let home = std::env::var_os("HOME")
-            .map(PathBuf::from)
-            .ok_or_else(|| crate::error::Error::Config("$HOME not set".into()))?;
+        let home = crate::state::home_dir()?;
         let trash_root = trash::default_trash_root()?;
         Ok(Self {
             roots: vec![home.clone(), home.join("Desktop")],
@@ -46,9 +44,7 @@ impl RootClutterMonitor {
     /// `from_config` convention. `roots`/`trash_root` are not yet
     /// configurable (no FilingConfig field for them exists today).
     pub fn from_config(cfg: &FilingConfig) -> Result<Self> {
-        let home = std::env::var_os("HOME")
-            .map(PathBuf::from)
-            .ok_or_else(|| crate::error::Error::Config("$HOME not set".into()))?;
+        let home = crate::state::home_dir()?;
         let trash_root = trash::default_trash_root()?;
         let inbox = cfg
             .roots
