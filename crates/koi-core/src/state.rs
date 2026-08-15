@@ -61,6 +61,16 @@ CREATE TABLE IF NOT EXISTS decisions (
 CREATE INDEX IF NOT EXISTS idx_decisions_proposal ON decisions(proposal_id);
 "#;
 
+/// The user's home directory, cross-platform: `$HOME` on Linux/macOS,
+/// `%USERPROFILE%` on Windows (which has no `$HOME`). The single home-dir
+/// resolution every call site should use instead of reading `$HOME` directly
+/// (TASK-KOI220 — direct `env::var_os("HOME")` reads panicked on Windows CI).
+pub fn home_dir() -> Result<PathBuf> {
+    directories::UserDirs::new()
+        .map(|dirs| dirs.home_dir().to_path_buf())
+        .ok_or_else(|| Error::Config("no user home directory".into()))
+}
+
 /// Runtime data directory: `~/.local/share/koi` on Linux, platform equivalents
 /// on macOS/Windows.
 ///
@@ -828,6 +838,12 @@ mod classifier_tests {
 mod tests {
     use super::*;
     use crate::types::{Observation, Severity};
+
+    #[test]
+    fn home_dir_resolves_to_an_existing_absolute_path() {
+        let home = home_dir().expect("HOME should resolve in the test environment");
+        assert!(home.is_absolute());
+    }
 
     #[test]
     fn migrates_empty_db() {

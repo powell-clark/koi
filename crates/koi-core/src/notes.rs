@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 
 /// Location of the notes vault: ~/notes/
 pub fn default_notes_dir() -> Option<PathBuf> {
-    std::env::var_os("HOME").map(|h| PathBuf::from(h).join("notes"))
+    crate::state::home_dir().ok().map(|h| h.join("notes"))
 }
 
 /// A single note, parsed from a Markdown file.

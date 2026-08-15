@@ -368,9 +368,7 @@ fn run_audit(quick: bool) -> Result<()> {
     }
 
     // Locate or create the audits directory.
-    let home = std::env::var_os("HOME")
-        .map(std::path::PathBuf::from)
-        .ok_or_else(|| anyhow::anyhow!("$HOME not set"))?;
+    let home = koi_core::state::home_dir()?;
     let audits_dir = home.join(".local/share/koi/audits");
     std::fs::create_dir_all(&audits_dir).context("create audits directory")?;
 
@@ -561,9 +559,7 @@ fn run_timers(action: TimerAction) -> Result<()> {
 fn install_audit_timers(dry_run: bool) -> Result<()> {
     use std::path::PathBuf;
 
-    let home: PathBuf = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .ok_or_else(|| anyhow::anyhow!("$HOME not set"))?;
+    let home: PathBuf = koi_core::state::home_dir()?;
 
     // Source: share/systemd/ relative to the project root (where this binary lives).
     let bin = std::env::current_exe().context("resolve binary path")?;
@@ -696,9 +692,7 @@ fn run_notes(action: NotesAction) -> Result<()> {
 }
 
 fn run_paths() -> Result<()> {
-    let home = std::env::var_os("HOME")
-        .map(std::path::PathBuf::from)
-        .ok_or_else(|| anyhow::anyhow!("$HOME not set"))?;
+    let home = koi_core::state::home_dir()?;
     let db = state::default_db_path().ok();
     let data = directories::ProjectDirs::from("com", "powellclark", "koi")
         .map(|d| d.data_dir().to_path_buf());
@@ -776,9 +770,7 @@ fn run_zones(custom_roots: Vec<std::path::PathBuf>) -> Result<()> {
     let roots = if !custom_roots.is_empty() {
         custom_roots
     } else {
-        let home = std::env::var_os("HOME")
-            .map(std::path::PathBuf::from)
-            .ok_or_else(|| anyhow::anyhow!("$HOME not set"))?;
+        let home = koi_core::state::home_dir()?;
         vec![
             home.join("Documents"),
             home.join("Downloads"),
@@ -849,9 +841,7 @@ fn run_dedupe_scan(custom_roots: Vec<std::path::PathBuf>) -> Result<()> {
     let roots = if !custom_roots.is_empty() {
         custom_roots
     } else {
-        let home = std::env::var_os("HOME")
-            .map(std::path::PathBuf::from)
-            .ok_or_else(|| anyhow::anyhow!("$HOME not set"))?;
+        let home = koi_core::state::home_dir()?;
         vec![
             filing_cfg
                 .roots
@@ -959,9 +949,7 @@ fn run_dedupe_apply(group_prefix: Option<String>, all_groups: bool, dry_run: boo
         return Ok(());
     }
 
-    let home = std::env::var_os("HOME")
-        .map(std::path::PathBuf::from)
-        .ok_or_else(|| anyhow::anyhow!("$HOME not set"))?;
+    let home = koi_core::state::home_dir()?;
     let trash_root = trash::default_trash_root()?;
     let now = chrono::Utc::now();
 
@@ -1080,9 +1068,7 @@ fn run_trash_empty(older_than: Option<String>, yes: bool) -> Result<()> {
 }
 
 fn run_clean(dry_run: bool) -> Result<()> {
-    let home = std::env::var_os("HOME")
-        .map(std::path::PathBuf::from)
-        .ok_or_else(|| anyhow::anyhow!("$HOME not set"))?;
+    let home = koi_core::state::home_dir()?;
     let plan = cleaners::plan(&home);
 
     let mut total_bytes: u64 = 0;
@@ -1350,9 +1336,7 @@ fn report_convergence(local_bytes: u64) -> Result<()> {
 fn run_backup(dry_run: bool, include_red: bool, status: bool) -> Result<()> {
     use std::path::PathBuf;
 
-    let home = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .ok_or_else(|| anyhow::anyhow!("$HOME not set"))?;
+    let home = koi_core::state::home_dir()?;
 
     // Load backup config
     let config_path = home.join(".config/koi/backup.toml");

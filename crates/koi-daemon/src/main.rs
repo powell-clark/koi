@@ -247,9 +247,7 @@ fn spawn_scan_loop(
 /// Default dedupe roots: configured overrides, falling back to `$HOME`'s
 /// Downloads/Documents/inbox — the same set `koi dedupe scan` defaults to.
 fn dedupe_roots(cfg: &FilingConfig) -> Result<Vec<std::path::PathBuf>> {
-    let home = std::env::var_os("HOME")
-        .map(std::path::PathBuf::from)
-        .ok_or_else(|| anyhow::anyhow!("$HOME not set"))?;
+    let home = koi_core::state::home_dir()?;
     Ok(vec![
         cfg.roots
             .downloads

@@ -30,9 +30,7 @@ impl GitMonitor {
                 scan_root: PathBuf::from(root),
             });
         }
-        let home = std::env::var_os("HOME")
-            .map(PathBuf::from)
-            .ok_or_else(|| crate::error::Error::Config("$HOME not set".into()))?;
+        let home = crate::state::home_dir()?;
         Ok(Self {
             scan_root: home.join("projects"),
         })

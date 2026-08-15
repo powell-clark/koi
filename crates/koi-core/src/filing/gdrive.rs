@@ -54,8 +54,8 @@ impl GoogleDriveMonitor {
     /// Load config from `~/.config/koi/gdrive.json`. Returns None if the file
     /// doesn't exist (monitor not configured) or cannot be parsed.
     pub fn load() -> Option<Self> {
-        let home = std::env::var_os("HOME")?;
-        let config_path = PathBuf::from(home).join(".config/koi/gdrive.json");
+        let home = crate::state::home_dir().ok()?;
+        let config_path = home.join(".config/koi/gdrive.json");
         if !config_path.exists() {
             return None;
         }
