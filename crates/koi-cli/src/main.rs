@@ -378,11 +378,17 @@ fn run_audit(quick: bool) -> Result<()> {
 
     println!("Running Lynis{}…", if quick { " (quick)" } else { "" });
 
+    // Machine-readable report written alongside the human-readable log. Lynis
+    // defaults this to /var/log/lynis-report.dat, which is root-only and so
+    // unreadable on the non-root path this command actively supports.
+    let report_dat_path = audits_dir.join(format!("lynis-{ts_str}.dat"));
+
     let mut cmd = std::process::Command::new("lynis");
     cmd.arg("audit")
         .arg("system")
         .arg("--no-colors")
-        .arg("--quiet");
+        .arg("--report-file")
+        .arg(&report_dat_path);
     if quick {
         cmd.args([
             "--tests-from-group",
@@ -390,7 +396,15 @@ fn run_audit(quick: bool) -> Result<()> {
         ]);
     }
 
-    let output = cmd.output().context("spawn lynis")?;
+    let output = cmd.output().map_err(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            anyhow::anyhow!(
+                "lynis is not installed or not on PATH — install it with: sudo apt install lynis"
+            )
+        } else {
+            anyhow::Error::new(e).context("spawn lynis")
+        }
+    })?;
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let combined = format!("{}{}", stdout, String::from_utf8_lossy(&output.stderr));
@@ -398,8 +412,14 @@ fn run_audit(quick: bool) -> Result<()> {
     // Write raw log to file.
     std::fs::write(&report_path, combined.as_bytes()).context("write audit log")?;
 
-    // Parse hardening index from the Lynis output.
-    let hardening_index = parse_lynis_hardening_index(&stdout);
+    // Read the score from the machine-readable report first, falling back to
+    // scraping stdout. `--quiet` used to be passed here, which suppressed the
+    // stdout summary this parser needs, so every run from 2026-08-16 onward
+    // recorded ?/100 while appearing to succeed (TASK-KOI108).
+    let hardening_index = std::fs::read_to_string(&report_dat_path)
+        .ok()
+        .and_then(|dat| parse_report_hardening_index(&dat))
+        .or_else(|| parse_lynis_hardening_index(&stdout));
     let lynis_version = parse_lynis_version(&stdout);
 
     if let Some(score) = hardening_index {
@@ -436,9 +456,15 @@ fn run_audit(quick: bool) -> Result<()> {
         }
     };
 
-    // Desktop notification when score drops or critical warnings found.
-    let critical_count = count_lynis_warnings(&stdout, "critical");
-    audit_notify(hardening_index, prev_score, critical_count, &report_path);
+    // Desktop notification when the score drops or Lynis raised real warnings.
+    // Counted from the structured report, falling back to the stdout scrape only
+    // if the report is unreadable — that scrape is a substring match and has
+    // produced a false critical alert (TASK-KOI108).
+    let warning_count = std::fs::read_to_string(&report_dat_path)
+        .ok()
+        .map(|dat| parse_report_warning_count(&dat))
+        .unwrap_or_else(|| count_lynis_warnings(&stdout, "warning"));
+    audit_notify(hardening_index, prev_score, warning_count, &report_path);
 
     Ok(())
 }
@@ -481,7 +507,7 @@ fn audit_notify(
 
     let body = if critical_count > 0 {
         format!(
-            "{score_msg} | {critical_count} critical warning(s)
+            "{score_msg} | {critical_count} warning(s)
 Report: {}",
             report_path.display()
         )
@@ -512,6 +538,38 @@ Report: {}",
 
 /// Extract the Lynis hardening index from stdout.
 /// Looks for: "  Hardening index : [<n>]"
+// Read the hardening index out of a Lynis `--report-file` .dat, which is
+// key=value and machine-readable, rather than out of human-facing stdout.
+//
+// This is the primary source because the stdout summary is suppressed by
+// `--quiet`, and parsing a report meant for humans was how the score came to be
+// silently missing on every run since 2026-08-16 (TASK-KOI108). The key must
+// match exactly: Lynis also writes `hardening_index_previous`, and a prefix
+// match would happily return the PREVIOUS run's score as if it were this one.
+fn parse_report_hardening_index(report: &str) -> Option<i64> {
+    report
+        .lines()
+        .filter_map(|line| line.split_once('='))
+        .find(|(key, _)| key.trim() == "hardening_index")
+        .and_then(|(_, value)| value.trim().parse::<i64>().ok())
+}
+
+// Count real Lynis warnings from the machine-readable report.
+//
+// Lynis distinguishes `warning[]=` (findings needing attention) from
+// `suggestion[]=` (advisory). Counting the structured key is exact, where
+// substring-searching human output is not: on 2026-08-20 the old counter
+// scanned stdout for the word "critical" and matched the SUGGESTION "Install
+// apt-listbugs to display a list of critical bugs", which raised a
+// critical-urgency desktop notification on a scan that had zero warnings.
+// Alert fatigue starts with alerts that were never real.
+fn parse_report_warning_count(report: &str) -> usize {
+    report
+        .lines()
+        .filter(|line| line.starts_with("warning[]="))
+        .count()
+}
+
 fn parse_lynis_hardening_index(output: &str) -> Option<i64> {
     for line in output.lines() {
         if line.to_ascii_lowercase().contains("hardening index") {
@@ -2306,6 +2364,52 @@ mod audit_parse_tests {
     #[test]
     fn hardening_index_returns_none_on_missing() {
         assert_eq!(parse_lynis_hardening_index("no score here"), None);
+    }
+
+    #[test]
+    fn parses_hardening_index_from_report_dat() {
+        // Key shape taken from a real Lynis 3.0.9 --report-file; the value is
+        // illustrative rather than this host's actual score.
+        let dat = "report_datetime_start=2026-08-20 05:46:59\n\
+                   lynis_version=3.0.9\n\
+                   hardening_index=42\n";
+        assert_eq!(parse_report_hardening_index(dat), Some(42));
+    }
+
+    #[test]
+    fn report_dat_hardening_index_none_when_absent_or_empty() {
+        assert_eq!(parse_report_hardening_index("lynis_version=3.0.9\n"), None);
+        // Lynis writes the key with no value when a scan is cut short.
+        assert_eq!(parse_report_hardening_index("hardening_index=\n"), None);
+    }
+
+    #[test]
+    fn report_warning_count_counts_only_real_warnings() {
+        // Shape from a real Lynis 3.0.9 report file. Suggestions are advisory
+        // and must not be counted as warnings.
+        let dat = "warning[]=Some real warning|TEST-0001|\n\
+                   suggestion[]=Install apt-listbugs to display critical bugs|DEB-0810|\n\
+                   suggestion[]=Another suggestion|TEST-0002|\n";
+        assert_eq!(parse_report_warning_count(dat), 1);
+    }
+
+    #[test]
+    fn a_suggestion_mentioning_critical_is_not_a_warning() {
+        // The exact line that produced a false CRITICAL desktop notification on
+        // 2026-08-20: a suggestion to install apt-listbugs, matched because the
+        // old counter substring-searched stdout for the word "critical".
+        let dat = "suggestion[]=Install apt-listbugs to display a list of \
+                   critical bugs prior to each APT installation|DEB-0810|\n";
+        assert_eq!(parse_report_warning_count(dat), 0);
+    }
+
+    #[test]
+    fn report_dat_parser_is_not_fooled_by_a_similar_key() {
+        // A prefix match would wrongly accept this; the key must be exact.
+        assert_eq!(
+            parse_report_hardening_index("hardening_index_previous=99\n"),
+            None
+        );
     }
 
     #[test]
