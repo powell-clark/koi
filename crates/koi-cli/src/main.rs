@@ -1333,6 +1333,27 @@ fn report_convergence(local_bytes: u64) -> Result<()> {
     Ok(())
 }
 
+/// Transactions per second the backup sync may issue against Drive.
+///
+/// Sized against the real failure rather than picked: `measure_convergence` uses
+/// 4, which suits a short read but would stall a sync of this tree indefinitely.
+/// 10/s is Drive's documented per-user steady-state shape, and it is the pacing —
+/// not the ceiling — that stops the 403 in INC-KOI023.
+const RCLONE_SYNC_TPS_LIMIT: u32 = 10;
+
+/// Burst allowance above `RCLONE_SYNC_TPS_LIMIT`, so a directory listing is not
+/// artificially serialised while the average stays inside quota.
+const RCLONE_SYNC_TPS_BURST: u32 = 20;
+
+/// High-level retries. A sync that trips quota should back off and resume rather
+/// than exit non-zero and wait a week for the timer (INC-KOI023: six consecutive
+/// runs failed outright, each transferring 0 B).
+const RCLONE_SYNC_RETRIES: u32 = 5;
+
+/// Per-object retries for transient 403/429 responses, which Drive returns
+/// routinely under contention and which should not fail an entire run.
+const RCLONE_SYNC_LOW_LEVEL_RETRIES: u32 = 20;
+
 fn run_backup(dry_run: bool, include_red: bool, status: bool) -> Result<()> {
     use std::path::PathBuf;
 
@@ -1509,11 +1530,28 @@ fn run_backup(dry_run: bool, include_red: bool, status: bool) -> Result<()> {
         // host understood (INC-KOI009, INC-KOI013, INC-KOI016). If a backup run
         // is ever implicated in another OOM event, dropping this one flag is the
         // first thing to try.
+        //
+        // --tpslimit / --retries pace those listings. Without them this path
+        // burst-listed a 746k-object tree flat out and Drive answered 403
+        // rateLimitExceeded during the listing phase, before a single byte moved
+        // — six consecutive runs transferred 0 B (INC-KOI023). measure_convergence
+        // above already carried these flags from 776ce32; the sync path was
+        // simply never given the same treatment. The limit is deliberately higher
+        // than the measurement's 4: this path moves real data and a sync paced at
+        // 4 tps would never finish, whereas the measurement is a short read.
         let mut args: Vec<String> = vec![
             "sync".into(),
             "--verbose".into(),
             "--progress".into(),
             "--fast-list".into(),
+            "--tpslimit".into(),
+            RCLONE_SYNC_TPS_LIMIT.to_string(),
+            "--tpslimit-burst".into(),
+            RCLONE_SYNC_TPS_BURST.to_string(),
+            "--retries".into(),
+            RCLONE_SYNC_RETRIES.to_string(),
+            "--low-level-retries".into(),
+            RCLONE_SYNC_LOW_LEVEL_RETRIES.to_string(),
         ];
         for pattern in &exclude_args {
             args.push("--exclude".into());
