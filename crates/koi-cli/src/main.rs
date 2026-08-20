@@ -536,8 +536,6 @@ Report: {}",
         .status();
 }
 
-/// Extract the Lynis hardening index from stdout.
-/// Looks for: "  Hardening index : [<n>]"
 // Read the hardening index out of a Lynis `--report-file` .dat, which is
 // key=value and machine-readable, rather than out of human-facing stdout.
 //
@@ -570,6 +568,8 @@ fn parse_report_warning_count(report: &str) -> usize {
         .count()
 }
 
+/// Extract the Lynis hardening index from stdout — the fallback source.
+/// Looks for a line containing "Hardening index" and takes its first number.
 fn parse_lynis_hardening_index(output: &str) -> Option<i64> {
     for line in output.lines() {
         if line.to_ascii_lowercase().contains("hardening index") {
