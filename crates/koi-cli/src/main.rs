@@ -1259,6 +1259,64 @@ fn is_excluded(rel_components: &[&std::ffi::OsStr], excludes: &[Vec<glob::Patter
     })
 }
 
+// Discover git repositories sitting directly inside `scan_rel` (a path relative
+// to `root`) and return one backup.toml-shaped exclude pattern per repo, sorted
+// so the argv and the local walk stay byte-identical between runs.
+//
+// Why this exists: a reference-material tree holds loose material that has no
+// other copy and must be backed up, alongside git repos that already have their
+// own remote and are duplicate protection to upload again. The static per-repo
+// exclude list this replaces needed a hand edit every time a repo was added,
+// and was silently wrong — a whole repo re-uploaded — whenever that was
+// forgotten (TASK-KOI166).
+//
+// `.git` is probed with `exists()` rather than `is_dir()` on purpose: a
+// submodule or a linked worktree carries `.git` as a FILE, and treating those
+// as non-repos would re-include exactly the trees this is meant to skip.
+fn git_repo_excludes_under(root: &std::path::Path, scan_rel: &str) -> Vec<String> {
+    let Ok(entries) = std::fs::read_dir(root.join(scan_rel)) else {
+        // A configured tree that does not exist on this machine is not an
+        // error: the same backup.toml is meant to work across hosts.
+        return Vec::new();
+    };
+    let mut names: Vec<String> = entries
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().join(".git").exists())
+        .filter_map(|e| e.file_name().to_str().map(str::to_owned))
+        .collect();
+    names.sort();
+    let prefix = scan_rel.trim_end_matches('/');
+    names
+        .into_iter()
+        .map(|n| format!("{prefix}/{n}/"))
+        .collect()
+}
+
+// Combine the hand-written exclude patterns from backup.toml with the ones
+// discovered by walking each configured auto-exclude tree, preserving the
+// static entries' order and dropping any duplicate the two sources both name.
+//
+// The dedupe is what lets the hand-maintained per-repo lines be deleted
+// safely: until they are, both sources name the same repo, and emitting it
+// twice would put a duplicate --exclude on the rclone argv (TASK-KOI166 AC-3).
+fn merged_exclude_patterns(
+    static_patterns: &[String],
+    roots: &[std::path::PathBuf],
+    scan_rels: &[String],
+) -> Vec<String> {
+    let mut merged: Vec<String> = static_patterns.to_vec();
+    for root in roots {
+        for scan_rel in scan_rels {
+            for pattern in git_repo_excludes_under(root, scan_rel) {
+                if !merged.contains(&pattern) {
+                    merged.push(pattern);
+                }
+            }
+        }
+    }
+    merged
+}
+
 // Measure how many bytes the encrypted remote currently holds and record that
 // against the local filtered total. `rclone size` on a crypt remote reports
 // decrypted sizes, so the two totals are directly comparable.
@@ -1430,6 +1488,21 @@ fn run_backup(dry_run: bool, include_red: bool, status: bool) -> Result<()> {
             .unwrap_or_default()
     };
 
+    let read_strings = |table_key: &str, array_key: &str| -> Vec<String> {
+        config
+            .get(table_key)
+            .and_then(|v| v.as_table())
+            .and_then(|t| t.get(array_key))
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|item| item.as_str())
+                    .map(str::to_owned)
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+
     let amber_roots = read_roots("amber_tier", "include");
     let red_roots = if include_red {
         read_roots("red_tier", "paths")
@@ -1437,18 +1510,27 @@ fn run_backup(dry_run: bool, include_red: bool, status: bool) -> Result<()> {
         Vec::new()
     };
 
-    let amber_excludes: Vec<Vec<glob::Pattern>> = config
-        .get("amber_tier")
-        .and_then(|v| v.as_table())
-        .and_then(|t| t.get("exclude"))
-        .and_then(|v| v.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|item| item.as_str())
-                .map(exclude_components)
-                .collect()
-        })
-        .unwrap_or_default();
+    // One exclude list, derived once, used by both consumers: the local walk
+    // just below (via exclude_components) and the rclone argv further down (via
+    // rclone_exclude_arg). Before TASK-KOI166 each read the config key
+    // independently, so any divergence between them would have meant the set of
+    // files koi measures and the set rclone uploads were quietly different sets.
+    //
+    // `auto_exclude_git_repos_under` names trees whose immediate subdirectories
+    // are checked for their own `.git` at scan time. A repo found there is
+    // excluded without anyone editing backup.toml, which is the whole point: the
+    // static list it replaces was one forgotten edit away from re-uploading an
+    // entire repo that already has a remote.
+    let exclude_patterns = merged_exclude_patterns(
+        &read_strings("amber_tier", "exclude"),
+        &amber_roots,
+        &read_strings("amber_tier", "auto_exclude_git_repos_under"),
+    );
+
+    let amber_excludes: Vec<Vec<glob::Pattern>> = exclude_patterns
+        .iter()
+        .map(|p| exclude_components(p))
+        .collect();
 
     // Collect files to upload, tracking each tier's count as we go.
     let mut to_upload: Vec<(PathBuf, u64)> = Vec::new();
@@ -1503,18 +1585,12 @@ fn run_backup(dry_run: bool, include_red: bool, status: bool) -> Result<()> {
         );
     }
 
-    let exclude_args: Vec<String> = config
-        .get("amber_tier")
-        .and_then(|v| v.as_table())
-        .and_then(|t| t.get("exclude"))
-        .and_then(|v| v.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|item| item.as_str())
-                .map(rclone_exclude_arg)
-                .collect()
-        })
-        .unwrap_or_default();
+    // Same merged list the local walk used, so the measured set and the
+    // uploaded set cannot drift apart.
+    let exclude_args: Vec<String> = exclude_patterns
+        .iter()
+        .map(|p| rclone_exclude_arg(p))
+        .collect();
 
     for (root, dest_name) in &sync_roots {
         let dest = format!("koi-crypt:/{dest_name}");
@@ -2370,5 +2446,155 @@ mod clean_worklog_tests {
                 "failed: docker layer (permission denied)".to_string(),
             ]
         );
+    }
+}
+
+#[cfg(test)]
+mod git_repo_autoexclude_tests {
+    use super::*;
+
+    // Own scratch tree per test, keyed by name and pid, so parallel test
+    // threads cannot collide. Matches the temp_dir convention already used in
+    // koi-core rather than pulling in a new dev-dependency.
+    fn scratch(name: &str) -> std::path::PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("koi-autoexclude-{}-{}", name, std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn nested_git_repo_is_excluded_and_loose_content_is_not() {
+        let root = scratch("nested");
+        let lib = root.join("amalavijnana/library");
+        std::fs::create_dir_all(lib.join("nichiren-buddhism-library/.git")).unwrap();
+        std::fs::create_dir_all(lib.join("books")).unwrap();
+
+        let excludes = git_repo_excludes_under(&root, "amalavijnana/library");
+
+        assert_eq!(
+            excludes,
+            vec!["amalavijnana/library/nichiren-buddhism-library/".to_string()]
+        );
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn auto_discovered_repos_merge_with_static_patterns_without_duplicates() {
+        let root = scratch("merge");
+        let lib = root.join("amalavijnana/library");
+        std::fs::create_dir_all(lib.join("nichiren-buddhism-library/.git")).unwrap();
+        std::fs::create_dir_all(lib.join("books")).unwrap();
+
+        let static_patterns = vec![
+            "**/target/".to_string(),
+            // The hand-maintained entry TASK-KOI166 AC-3 says must become
+            // redundant. While both sources name it, the merge must not emit
+            // it twice.
+            "amalavijnana/library/nichiren-buddhism-library/".to_string(),
+        ];
+
+        let merged = merged_exclude_patterns(
+            &static_patterns,
+            std::slice::from_ref(&root),
+            &["amalavijnana/library".to_string()],
+        );
+
+        assert_eq!(
+            merged,
+            vec![
+                "**/target/".to_string(),
+                "amalavijnana/library/nichiren-buddhism-library/".to_string(),
+            ],
+            "auto-discovery must not append a repo the static list already names"
+        );
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn submodule_style_dotgit_file_still_counts_as_a_repo() {
+        let root = scratch("submodule");
+        let lib = root.join("amalavijnana/library");
+        std::fs::create_dir_all(lib.join("linked-worktree")).unwrap();
+        // A submodule or linked worktree carries .git as a FILE, not a
+        // directory. Probing with is_dir() would re-include the whole tree.
+        std::fs::write(lib.join("linked-worktree/.git"), "gitdir: ../../.git/x").unwrap();
+
+        assert_eq!(
+            git_repo_excludes_under(&root, "amalavijnana/library"),
+            vec!["amalavijnana/library/linked-worktree/".to_string()]
+        );
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn absent_tree_yields_no_excludes_rather_than_failing() {
+        // The same backup.toml is meant to work across hosts, so a configured
+        // tree that does not exist here is not an error.
+        let root = scratch("absent");
+        assert!(git_repo_excludes_under(&root, "not/here").is_empty());
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn discovery_order_is_stable_regardless_of_readdir_order() {
+        // readdir order is filesystem-dependent; unsorted output would make the
+        // rclone argv differ between runs on identical input.
+        let root = scratch("sorted");
+        let lib = root.join("amalavijnana/library");
+        for name in ["zulu", "alpha", "mike"] {
+            std::fs::create_dir_all(lib.join(name).join(".git")).unwrap();
+        }
+
+        let found = git_repo_excludes_under(&root, "amalavijnana/library");
+
+        assert_eq!(
+            found,
+            vec![
+                "amalavijnana/library/alpha/".to_string(),
+                "amalavijnana/library/mike/".to_string(),
+                "amalavijnana/library/zulu/".to_string(),
+            ]
+        );
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    // Environment-dependent, so ignored by default and run explicitly with
+    // `cargo test -p koi-cli -- --ignored`. This is TASK-KOI166 AC-4: proof
+    // against the operator's actual library/ tree rather than a fixture. It
+    // asserts the shape (the one repo excluded, the loose folders not) rather
+    // than an exact folder list, so adding reference material does not fail it.
+    #[test]
+    #[ignore]
+    fn real_library_tree_excludes_only_its_git_repos() {
+        let root = std::path::PathBuf::from(std::env::var("HOME").unwrap()).join("projects");
+        let scan_rel = "amalavijnana/library";
+        if !root.join(scan_rel).is_dir() {
+            eprintln!("skipping: {scan_rel} not present under {}", root.display());
+            return;
+        }
+
+        let found = git_repo_excludes_under(&root, scan_rel);
+        eprintln!("auto-excluded from the real tree: {found:#?}");
+
+        assert!(
+            found.contains(&"amalavijnana/library/nichiren-buddhism-library/".to_string()),
+            "the one known nested repo must be excluded, got {found:?}"
+        );
+        for loose in [
+            "books",
+            "papers",
+            "patents",
+            "transcripts",
+            "biographies",
+            "philosophy",
+        ] {
+            let pattern = format!("{scan_rel}/{loose}/");
+            assert!(
+                !found.contains(&pattern),
+                "loose reference material {loose} has no other backup and must stay included"
+            );
+        }
     }
 }

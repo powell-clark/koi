@@ -73,6 +73,46 @@ rclone config show koi-crypt
 rclone listremotes
 ```
 
+#### Exclusions
+
+`amber_tier.exclude` lists patterns to skip. A pattern names one or more
+trailing path components matched anywhere under an included root, so
+`"**/target/"` skips every `target/` directory at any depth.
+
+```toml
+[amber_tier]
+include = ["~/projects"]
+
+exclude = [
+    "**/target/",
+    "**/node_modules/",
+]
+
+# Trees whose immediate subdirectories are checked for their own .git at
+# scan time. Any that has one is excluded automatically.
+auto_exclude_git_repos_under = ["reference-material"]
+```
+
+`auto_exclude_git_repos_under` exists for the case where a directory mixes
+material that has no other copy with checkouts that already have a git remote.
+The loose material must be backed up; re-uploading the checkouts is duplicate
+protection. Listing each checkout under `exclude` works but needs a hand edit
+every time one is added, and a forgotten edit silently re-uploads a whole repo
+— so this detects them instead.
+
+A subdirectory counts as a repo when it contains `.git`, whether that is a
+directory or the file a submodule or linked worktree uses. Detection is one
+level deep: a repo nested further down is not found, and a configured tree that
+does not exist on this machine is skipped rather than treated as an error, so
+one config can be shared across hosts. Discovered patterns are merged with the
+static `exclude` list and de-duplicated, so a repo named in both is excluded
+once — meaning the auto-detection can be added first and the hand-written lines
+removed afterwards, with no window where the exclusion is lost.
+
+The same merged list drives both the local size measurement and the `--exclude`
+arguments passed to `rclone`, so what koi reports and what rclone uploads cannot
+drift apart.
+
 ### Backup Operations
 
 #### Manual Backup
