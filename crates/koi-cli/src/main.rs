@@ -2042,9 +2042,19 @@ fn run_scan(json: bool) -> Result<()> {
 
     // Persist proposals — idempotent upsert, safe to re-scan. Separate
     // write-connection from the classifier's read-connection.
+    //
+    // A proposal the operator already rejected is not re-queued (ADR-0014 makes
+    // rejection a first-class signal), so it must not be reported as stored
+    // either — that mismatch between scan output and `koi proposals` is the
+    // defect TASK-KOI228 fixes.
     let conn = open_state()?;
+    let mut queued: Vec<&koi_core::filing::Proposal> = Vec::new();
+    let mut suppressed = 0usize;
     for p in &all_proposals {
-        state::upsert_proposal(&conn, p).context("persist proposal")?;
+        match state::upsert_proposal(&conn, p).context("persist proposal")? {
+            state::UpsertOutcome::SuppressedByRejection => suppressed += 1,
+            _ => queued.push(p),
+        }
     }
 
     // Stale-proposal sweep: a pending proposal whose source has since
@@ -2054,22 +2064,29 @@ fn run_scan(json: bool) -> Result<()> {
     }
 
     if json {
-        println!("{}", serde_json::to_string_pretty(&all_proposals)?);
+        println!("{}", serde_json::to_string_pretty(&queued)?);
         return Ok(());
     }
 
-    if all_proposals.is_empty() {
-        println!(
-            "No proposals — accumulation points are clean or contain only unknown-type files."
-        );
+    if queued.is_empty() {
+        if suppressed > 0 {
+            println!(
+                "No new proposals — {} held back by an earlier rejection (`koi history decisions` to review).",
+                suppressed
+            );
+        } else {
+            println!(
+                "No proposals — accumulation points are clean or contain only unknown-type files."
+            );
+        }
         return Ok(());
     }
 
     println!(
         "{} proposal(s) — stored; review with `koi proposals`, apply with `koi approve --all`:",
-        all_proposals.len()
+        queued.len()
     );
-    for p in &all_proposals {
+    for p in &queued {
         let action_str = match &p.action {
             ProposedAction::Move { dest } => format!("→ {}", dest.display()),
             ProposedAction::Archive { archive_root } => {

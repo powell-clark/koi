@@ -400,14 +400,36 @@ pub fn latest_reports_all(conn: &Connection) -> Result<Vec<MonitorReport>> {
 
 // -- proposals -------------------------------------------------------------
 
-pub fn upsert_proposal(conn: &Connection, p: &Proposal) -> Result<()> {
+/// What `upsert_proposal` did with a proposal the monitor emitted.
+///
+/// A proposal id is `hash(monitor, path, action)`, so a file that returns to a
+/// watched location re-emits the *same* id. Before TASK-KOI228 every such
+/// re-emission was swallowed by `ON CONFLICT DO NOTHING`: the row kept whatever
+/// terminal state it had reached, `koi scan` still announced it as stored, and
+/// `koi proposals` showed nothing. Reporting the outcome is what lets the caller
+/// tell the operator the truth about a scan.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UpsertOutcome {
+    /// First time this proposal has been seen — now pending.
+    Inserted,
+    /// Already sitting in the queue; left untouched so queue order is stable.
+    AlreadyPending,
+    /// A spent proposal (applied, failed, stale) whose subject is back — returned
+    /// to pending with a fresh `emitted_at`.
+    Requeued,
+    /// The operator rejected this exact proposal. ADR-0014 makes rejection a
+    /// first-class signal, so the next scan does not quietly reverse it.
+    SuppressedByRejection,
+}
+
+pub fn upsert_proposal(conn: &Connection, p: &Proposal) -> Result<UpsertOutcome> {
     let (action_kind, action_payload) = serialize_action(&p.action)?;
     let tier = match p.autonomy_tier {
         AutonomyTier::Full => "full",
         AutonomyTier::Approve => "approve",
         AutonomyTier::Human => "human",
     };
-    conn.execute(
+    let inserted = conn.execute(
         "INSERT INTO proposals(id, monitor, path, action_kind, action_payload, rationale, confidence, autonomy_tier, emitted_at, state)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'pending')
          ON CONFLICT(id) DO NOTHING",
@@ -423,7 +445,35 @@ pub fn upsert_proposal(conn: &Connection, p: &Proposal) -> Result<()> {
             p.emitted_at.to_rfc3339(),
         ],
     )?;
-    Ok(())
+    if inserted == 1 {
+        return Ok(UpsertOutcome::Inserted);
+    }
+
+    let existing: String = conn.query_row(
+        "SELECT state FROM proposals WHERE id = ?1",
+        params![p.id.0],
+        |r| r.get(0),
+    )?;
+    match existing.as_str() {
+        "pending" => Ok(UpsertOutcome::AlreadyPending),
+        "rejected" => Ok(UpsertOutcome::SuppressedByRejection),
+        // applied / failed / stale — the earlier run is spent and the subject is
+        // back in front of the monitor, so the old row no longer describes it.
+        // Refresh the rationale and confidence too: the classifier may have
+        // learned since, and the action is fixed by the id hash.
+        _ => {
+            conn.execute(
+                "UPDATE proposals SET state = 'pending', emitted_at = ?2, rationale = ?3, confidence = ?4 WHERE id = ?1",
+                params![
+                    p.id.0,
+                    p.emitted_at.to_rfc3339(),
+                    p.rationale,
+                    p.confidence as f64,
+                ],
+            )?;
+            Ok(UpsertOutcome::Requeued)
+        }
+    }
 }
 
 pub fn pending_proposals(conn: &Connection) -> Result<Vec<PendingProposal>> {
@@ -1223,6 +1273,107 @@ mod tests {
         upsert_proposal(&conn, &p).unwrap(); // should not duplicate
         let pending = pending_proposals(&conn).unwrap();
         assert_eq!(pending.len(), 1);
+    }
+
+    #[test]
+    fn applied_proposal_returns_to_pending_when_re_emitted() {
+        // A file that comes back to a watched location must be proposable again.
+        // Before TASK-KOI228 the insert was discarded by ON CONFLICT DO NOTHING,
+        // so the row stayed `applied` and the queue never showed it.
+        let conn = open_in_memory().unwrap();
+        let p = Proposal::new(
+            "RootClutterMonitor",
+            PathBuf::from("/home/u/.profile.bak-20260717"),
+            ProposedAction::Move {
+                dest: PathBuf::from("/home/u/.local/share/koi/trash/.profile.bak-20260717"),
+            },
+            "tmp/backup-pattern file at $HOME root",
+            0.85,
+        );
+        assert_eq!(upsert_proposal(&conn, &p).unwrap(), UpsertOutcome::Inserted);
+        conn.execute(
+            "UPDATE proposals SET state = 'applied' WHERE id = ?1",
+            params![p.id.0],
+        )
+        .unwrap();
+        assert_eq!(pending_proposals(&conn).unwrap().len(), 0);
+
+        // The file was restored, so the monitor emits the same proposal again.
+        assert_eq!(upsert_proposal(&conn, &p).unwrap(), UpsertOutcome::Requeued);
+        let pending = pending_proposals(&conn).unwrap();
+        assert_eq!(
+            pending.len(),
+            1,
+            "a re-emitted proposal whose earlier run is spent must return to the queue"
+        );
+        assert_eq!(pending[0].id, p.id);
+    }
+
+    #[test]
+    fn rejected_proposal_stays_suppressed_but_is_reported() {
+        // ADR-0014 makes rejection a first-class signal, so re-emission must not
+        // quietly reverse the operator. It must not lie about it either: the
+        // caller is told the proposal was suppressed rather than stored.
+        let conn = open_in_memory().unwrap();
+        let p = Proposal::new(
+            "DownloadsMonitor",
+            PathBuf::from("/home/u/Downloads/script.pdf"),
+            ProposedAction::Move {
+                dest: PathBuf::from("/home/u/Documents/PDFs/script.pdf"),
+            },
+            "PDF document",
+            0.85,
+        );
+        upsert_proposal(&conn, &p).unwrap();
+        record_decision(&conn, &p.id, Decision::Rejected, Some("no thanks")).unwrap();
+
+        assert_eq!(
+            upsert_proposal(&conn, &p).unwrap(),
+            UpsertOutcome::SuppressedByRejection
+        );
+        assert_eq!(
+            pending_proposals(&conn).unwrap().len(),
+            0,
+            "an operator rejection is not reversed by the next scan"
+        );
+    }
+
+    #[test]
+    fn re_emitting_a_pending_proposal_leaves_it_untouched() {
+        let conn = open_in_memory().unwrap();
+        let p = Proposal::new(
+            "M",
+            PathBuf::from("/x"),
+            ProposedAction::Move {
+                dest: PathBuf::from("/y"),
+            },
+            "r",
+            0.5,
+        );
+        assert_eq!(upsert_proposal(&conn, &p).unwrap(), UpsertOutcome::Inserted);
+        let first: String = conn
+            .query_row(
+                "SELECT emitted_at FROM proposals WHERE id = ?1",
+                params![p.id.0],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            upsert_proposal(&conn, &p).unwrap(),
+            UpsertOutcome::AlreadyPending
+        );
+        let second: String = conn
+            .query_row(
+                "SELECT emitted_at FROM proposals WHERE id = ?1",
+                params![p.id.0],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            first, second,
+            "a still-pending proposal keeps its original emitted_at so queue order is stable"
+        );
+        assert_eq!(pending_proposals(&conn).unwrap().len(), 1);
     }
 
     #[test]
