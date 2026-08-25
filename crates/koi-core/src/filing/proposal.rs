@@ -124,6 +124,20 @@ impl Proposal {
             emitted_at: Utc::now(),
         }
     }
+
+    /// Raise this proposal to `AutonomyTier::Human`, marking it as something a
+    /// person must look at individually rather than sweep in a batch.
+    ///
+    /// Monitors over content-bearing roots (Downloads, Documents, inbox, Drive)
+    /// use this. Filing is extension-based and not content-aware, so a bank
+    /// statement and a screenshot land in the same bucket and are
+    /// indistinguishable to the batch path — on 2026-08-25 one `--all` call
+    /// swept 334 personal documents in about 160ms. The tier is deliberately
+    /// not part of the id hash, so raising it leaves existing rows addressable.
+    pub fn requiring_human_review(mut self) -> Self {
+        self.autonomy_tier = AutonomyTier::Human;
+        self
+    }
 }
 
 #[cfg(test)]
@@ -171,5 +185,37 @@ mod tests {
     fn confidence_clamped() {
         let p = Proposal::new("M", PathBuf::from("/x"), ProposedAction::Delete, "r", 2.5);
         assert!((p.confidence - 1.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn human_review_upgrades_the_tier_without_changing_the_id() {
+        // The tier is not part of the id hash, so a monitor can raise it without
+        // orphaning rows already in the proposals table (TASK-KOI229).
+        let mk = || {
+            Proposal::new(
+                "DownloadsMonitor",
+                PathBuf::from("/home/u/Downloads/statement.pdf"),
+                ProposedAction::Move {
+                    dest: PathBuf::from("/home/u/Documents/PDFs/statement.pdf"),
+                },
+                "PDF document",
+                0.85,
+            )
+        };
+        let plain = mk();
+        let raised = mk().requiring_human_review();
+        assert_eq!(plain.autonomy_tier, AutonomyTier::Approve);
+        assert_eq!(raised.autonomy_tier, AutonomyTier::Human);
+        assert_eq!(
+            plain.id, raised.id,
+            "raising the tier must not change the proposal identity"
+        );
+    }
+
+    #[test]
+    fn requiring_human_review_never_downgrades_a_delete() {
+        let p = Proposal::new("M", PathBuf::from("/x"), ProposedAction::Delete, "r", 0.5)
+            .requiring_human_review();
+        assert_eq!(p.autonomy_tier, AutonomyTier::Human);
     }
 }

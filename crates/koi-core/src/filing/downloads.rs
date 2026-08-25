@@ -136,13 +136,16 @@ impl FileMonitor for DownloadsMonitor {
             }
 
             if let Some((dest, rationale, confidence)) = self.classify(&path, ctx) {
-                proposals.push(Proposal::new(
-                    "DownloadsMonitor",
-                    path,
-                    ProposedAction::Move { dest },
-                    rationale,
-                    confidence,
-                ));
+                proposals.push(
+                    Proposal::new(
+                        "DownloadsMonitor",
+                        path,
+                        ProposedAction::Move { dest },
+                        rationale,
+                        confidence,
+                    )
+                    .requiring_human_review(),
+                );
             }
             // Unknown extensions: no proposal. DO NOT emit Ignore — that would
             // train the classifier away from learning them later. Silence is
@@ -182,6 +185,27 @@ mod tests {
         let mon = DownloadsMonitor::from_config(&cfg).unwrap();
         assert_eq!(mon.roots(), vec![PathBuf::from("/mnt/scratch/Downloads")]);
         assert!(mon.docs.ends_with("Documents"));
+    }
+
+    #[test]
+    fn proposals_require_human_review_because_downloads_is_content_bearing() {
+        // TASK-KOI229: a batch `koi approve --all` swept 334 personal documents
+        // in ~160ms because every proposal sat at the same Approve tier. Files
+        // under Downloads are content-bearing, so each one needs a human to look
+        // at it — the tier is what lets the batch path hold them back.
+        let downloads = tmp("dl-tier");
+        let documents = tmp("docs-tier");
+        fs::write(downloads.join("statement.pdf"), b"x").unwrap();
+
+        let mon = DownloadsMonitor::with_roots(downloads, documents);
+        let proposals = mon.scan(&ScanContext::new_now()).unwrap();
+
+        assert_eq!(proposals.len(), 1);
+        assert_eq!(
+            proposals[0].autonomy_tier,
+            crate::filing::AutonomyTier::Human,
+            "content-bearing proposals must not be sweepable by --all"
+        );
     }
 
     #[test]

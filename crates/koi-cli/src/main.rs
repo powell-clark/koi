@@ -90,6 +90,11 @@ enum Command {
         /// Cap the number of proposals applied in one invocation.
         #[arg(long)]
         limit: Option<usize>,
+        /// With --all, also sweep content-bearing proposals (Downloads,
+        /// Documents, inbox, Drive). Off by default: filing is extension-based,
+        /// so a bank statement and a screenshot look identical to the batch path.
+        #[arg(long, requires = "all")]
+        include_sensitive: bool,
         /// Proposal id (hex prefix).
         id: Option<String>,
     },
@@ -258,8 +263,9 @@ fn main() -> Result<()> {
             all,
             dry_run,
             limit,
+            include_sensitive,
             id,
-        } => run_approve(all, dry_run, limit, id)?,
+        } => run_approve(all, dry_run, limit, include_sensitive, id)?,
         Command::Reject { id, all, monitor } => run_reject(id, all, monitor)?,
         Command::History { monitor, limit } => run_history(&monitor, limit)?,
         Command::Stats => run_stats()?,
@@ -2149,12 +2155,27 @@ fn run_proposals(monitor: Option<String>, limit: Option<usize>) -> Result<()> {
     Ok(())
 }
 
-fn run_approve(all: bool, dry_run: bool, limit: Option<usize>, id: Option<String>) -> Result<()> {
+fn run_approve(
+    all: bool,
+    dry_run: bool,
+    limit: Option<usize>,
+    include_sensitive: bool,
+    id: Option<String>,
+) -> Result<()> {
     let conn = open_state()?;
     let pending = state::pending_proposals(&conn).context("load pending")?;
 
+    // Held back from the batch path only. Naming one id still approves it —
+    // that is a person reading one proposal, which is what the tier asks for.
+    let mut held_back = 0usize;
     let mut to_apply: Vec<_> = if all {
-        pending
+        if include_sensitive {
+            pending
+        } else {
+            let (sweepable, held) = state::partition_for_batch_approval(pending);
+            held_back = held.len();
+            sweepable
+        }
     } else {
         let Some(prefix) = id else {
             anyhow::bail!("usage: koi approve --all | koi approve <id-prefix>");
@@ -2170,8 +2191,23 @@ fn run_approve(all: bool, dry_run: bool, limit: Option<usize>, id: Option<String
     }
 
     if to_apply.is_empty() {
-        println!("No matching pending proposals.");
+        if held_back > 0 {
+            println!(
+                "No batch-approvable proposals. {held_back} held back for individual review \
+                 — `koi proposals` to read them, `koi approve <id>` to take one, \
+                 `koi approve --all --include-sensitive` to sweep them anyway."
+            );
+        } else {
+            println!("No matching pending proposals.");
+        }
         return Ok(());
+    }
+
+    if held_back > 0 {
+        println!(
+            "{held_back} content-bearing proposal(s) held back for individual review \
+             (`koi approve <id>`, or --include-sensitive to sweep them)."
+        );
     }
 
     if dry_run {

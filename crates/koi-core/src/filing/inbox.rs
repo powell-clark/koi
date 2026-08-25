@@ -132,13 +132,16 @@ impl FileMonitor for InboxMonitor {
                 continue;
             }
             if let Some((dest, rationale, confidence)) = self.classify(&path, ctx) {
-                proposals.push(Proposal::new(
-                    "InboxMonitor",
-                    path,
-                    ProposedAction::Move { dest },
-                    rationale,
-                    confidence,
-                ));
+                proposals.push(
+                    Proposal::new(
+                        "InboxMonitor",
+                        path,
+                        ProposedAction::Move { dest },
+                        rationale,
+                        confidence,
+                    )
+                    .requiring_human_review(),
+                );
             }
         }
         Ok(proposals)

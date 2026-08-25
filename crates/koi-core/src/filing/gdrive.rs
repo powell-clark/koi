@@ -162,16 +162,19 @@ impl FileMonitor for GoogleDriveMonitor {
                 );
                 // PathBuf used as a display handle — remote path is the real reference.
                 let display_path = PathBuf::from(&remote_src);
-                proposals.push(Proposal::new(
-                    "GoogleDriveMonitor",
-                    display_path,
-                    ProposedAction::DriveMove {
-                        remote_src,
-                        remote_dest,
-                    },
-                    format!("Google Drive file → {subdir}"),
-                    confidence,
-                ));
+                proposals.push(
+                    Proposal::new(
+                        "GoogleDriveMonitor",
+                        display_path,
+                        ProposedAction::DriveMove {
+                            remote_src,
+                            remote_dest,
+                        },
+                        format!("Google Drive file → {subdir}"),
+                        confidence,
+                    )
+                    .requiring_human_review(),
+                );
             }
         }
         Ok(proposals)

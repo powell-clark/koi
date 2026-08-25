@@ -240,6 +240,26 @@ mod tests {
     }
 
     #[test]
+    fn tmp_residue_stays_batch_sweepable() {
+        // The counterpart to the Downloads tier test: RootClutterMonitor sweeps
+        // machine residue, not the operator's documents, so `koi approve --all`
+        // must keep working on it (TASK-KOI229).
+        let home = tmp("residue-tier");
+        fs::write(home.join(".claude.json.tmp.4242.abcdef"), b"x").unwrap();
+
+        let mon = monitor_for(&home);
+        let proposals = mon.scan(&ScanContext::new_now()).unwrap();
+
+        assert_eq!(proposals.len(), 1);
+        assert_eq!(
+            proposals[0].autonomy_tier,
+            crate::filing::AutonomyTier::Approve,
+            "residue is not content-bearing; holding it back would starve the loop"
+        );
+        fs::remove_dir_all(&home).ok();
+    }
+
+    #[test]
     fn ordinary_dotfile_is_never_proposed() {
         let home = tmp("ordinary-dotfile");
         fs::write(home.join(".bashrc"), b"export PATH=x").unwrap();

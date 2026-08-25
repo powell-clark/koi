@@ -476,6 +476,20 @@ pub fn upsert_proposal(conn: &Connection, p: &Proposal) -> Result<UpsertOutcome>
     }
 }
 
+/// Split a pending batch into the part `koi approve --all` may sweep and the
+/// part that needs a human to look at each item.
+///
+/// The held-back half is `AutonomyTier::Human` — content-bearing proposals from
+/// Downloads, Documents, inbox and Drive. They stay approvable one id at a time,
+/// which is a person reading one proposal; what they are not is sweepable.
+pub fn partition_for_batch_approval(
+    pending: Vec<PendingProposal>,
+) -> (Vec<PendingProposal>, Vec<PendingProposal>) {
+    pending
+        .into_iter()
+        .partition(|p| p.autonomy_tier != "human")
+}
+
 pub fn pending_proposals(conn: &Connection) -> Result<Vec<PendingProposal>> {
     let mut stmt = conn.prepare(
         "SELECT id, monitor, path, action_kind, action_payload, rationale, confidence, autonomy_tier, emitted_at
@@ -1273,6 +1287,42 @@ mod tests {
         upsert_proposal(&conn, &p).unwrap(); // should not duplicate
         let pending = pending_proposals(&conn).unwrap();
         assert_eq!(pending.len(), 1);
+    }
+
+    #[test]
+    fn batch_approval_holds_back_human_tier_proposals() {
+        // TASK-KOI229: `koi approve --all` must not be able to sweep a
+        // content-bearing proposal. Per-id approval is still allowed — that is
+        // a human looking at one item, which is the whole point of the tier.
+        let conn = open_in_memory().unwrap();
+        let residue = Proposal::new(
+            "RootClutterMonitor",
+            PathBuf::from("/home/u/.claude.json.tmp.1"),
+            ProposedAction::Move {
+                dest: PathBuf::from("/home/u/.local/share/koi/trash/.claude.json.tmp.1"),
+            },
+            "residue",
+            0.85,
+        );
+        let document = Proposal::new(
+            "DownloadsMonitor",
+            PathBuf::from("/home/u/Downloads/passport.pdf"),
+            ProposedAction::Move {
+                dest: PathBuf::from("/home/u/Documents/PDFs/passport.pdf"),
+            },
+            "PDF document",
+            0.85,
+        )
+        .requiring_human_review();
+        upsert_proposal(&conn, &residue).unwrap();
+        upsert_proposal(&conn, &document).unwrap();
+
+        let (sweepable, held) = partition_for_batch_approval(pending_proposals(&conn).unwrap());
+
+        assert_eq!(sweepable.len(), 1);
+        assert_eq!(sweepable[0].id, residue.id);
+        assert_eq!(held.len(), 1);
+        assert_eq!(held[0].id, document.id);
     }
 
     #[test]
