@@ -490,6 +490,40 @@ pub fn partition_for_batch_approval(
         .partition(|p| p.autonomy_tier != "human")
 }
 
+/// Narrow a pending batch to one monitor's proposals.
+///
+/// An unknown name is an error naming what *is* present, not an empty result:
+/// a typo and a genuinely-drained queue both print "nothing matched", and the
+/// operator cannot tell which they got (TASK-KOI226).
+pub fn filter_by_monitor(
+    pending: Vec<PendingProposal>,
+    monitor: Option<&str>,
+) -> Result<Vec<PendingProposal>> {
+    let Some(name) = monitor else {
+        return Ok(pending);
+    };
+    let matched: Vec<PendingProposal> = pending
+        .iter()
+        .filter(|p| p.monitor == name)
+        .cloned()
+        .collect();
+    if matched.is_empty() {
+        let mut available: Vec<&str> = pending.iter().map(|p| p.monitor.as_str()).collect();
+        available.sort_unstable();
+        available.dedup();
+        if available.is_empty() {
+            return Err(crate::Error::Config(format!(
+                "no pending proposals at all, so none from {name:?}"
+            )));
+        }
+        return Err(crate::Error::Config(format!(
+            "no pending proposals from {name:?} — pending monitors are: {}",
+            available.join(", ")
+        )));
+    }
+    Ok(matched)
+}
+
 pub fn pending_proposals(conn: &Connection) -> Result<Vec<PendingProposal>> {
     let mut stmt = conn.prepare(
         "SELECT id, monitor, path, action_kind, action_payload, rationale, confidence, autonomy_tier, emitted_at
@@ -1287,6 +1321,52 @@ mod tests {
         upsert_proposal(&conn, &p).unwrap(); // should not duplicate
         let pending = pending_proposals(&conn).unwrap();
         assert_eq!(pending.len(), 1);
+    }
+
+    #[test]
+    fn monitor_filter_selects_one_class_and_names_typos() {
+        let conn = open_in_memory().unwrap();
+        for (mon, path) in [
+            ("RootClutterMonitor", "/home/u/.claude.json.tmp.1"),
+            ("RootClutterMonitor", "/home/u/.claude.json.tmp.2"),
+            ("GoogleDriveMonitor", "/home/u/Drive/x.pdf"),
+        ] {
+            let p = Proposal::new(
+                mon,
+                PathBuf::from(path),
+                ProposedAction::Move {
+                    dest: PathBuf::from("/home/u/dest"),
+                },
+                "r",
+                0.8,
+            );
+            upsert_proposal(&conn, &p).unwrap();
+        }
+
+        let all = pending_proposals(&conn).unwrap();
+        assert_eq!(filter_by_monitor(all.clone(), None).unwrap().len(), 3);
+        assert_eq!(
+            filter_by_monitor(all.clone(), Some("RootClutterMonitor"))
+                .unwrap()
+                .len(),
+            2
+        );
+
+        // A typo must say so rather than look like a drained queue.
+        let err = filter_by_monitor(all, Some("RootClutter"))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("RootClutterMonitor"), "got: {err}");
+        assert!(err.contains("GoogleDriveMonitor"), "got: {err}");
+    }
+
+    #[test]
+    fn monitor_filter_on_an_empty_queue_says_the_queue_is_empty() {
+        let conn = open_in_memory().unwrap();
+        let err = filter_by_monitor(pending_proposals(&conn).unwrap(), Some("AnyMonitor"))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("no pending proposals at all"), "got: {err}");
     }
 
     #[test]

@@ -90,6 +90,9 @@ enum Command {
         /// Cap the number of proposals applied in one invocation.
         #[arg(long)]
         limit: Option<usize>,
+        /// With --all, only approve proposals from this monitor.
+        #[arg(long, requires = "all")]
+        monitor: Option<String>,
         /// With --all, also sweep content-bearing proposals (Downloads,
         /// Documents, inbox, Drive). Off by default: filing is extension-based,
         /// so a bank statement and a screenshot look identical to the batch path.
@@ -263,9 +266,10 @@ fn main() -> Result<()> {
             all,
             dry_run,
             limit,
+            monitor,
             include_sensitive,
             id,
-        } => run_approve(all, dry_run, limit, include_sensitive, id)?,
+        } => run_approve(all, dry_run, limit, monitor, include_sensitive, id)?,
         Command::Reject { id, all, monitor } => run_reject(id, all, monitor)?,
         Command::History { monitor, limit } => run_history(&monitor, limit)?,
         Command::Stats => run_stats()?,
@@ -2181,11 +2185,17 @@ fn run_approve(
     all: bool,
     dry_run: bool,
     limit: Option<usize>,
+    monitor: Option<String>,
     include_sensitive: bool,
     id: Option<String>,
 ) -> Result<()> {
     let conn = open_state()?;
-    let pending = state::pending_proposals(&conn).context("load pending")?;
+    let mut pending = state::pending_proposals(&conn).context("load pending")?;
+    if all {
+        // Narrows before the tier split, so the held-back count reports only
+        // the monitor actually being approved (TASK-KOI226).
+        pending = state::filter_by_monitor(pending, monitor.as_deref())?;
+    }
 
     // Held back from the batch path only. Naming one id still approves it —
     // that is a person reading one proposal, which is what the tier asks for.
