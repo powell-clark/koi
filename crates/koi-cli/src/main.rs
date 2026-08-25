@@ -2155,6 +2155,28 @@ fn run_proposals(monitor: Option<String>, limit: Option<usize>) -> Result<()> {
     Ok(())
 }
 
+/// Reject an `<id-prefix>` argument that is not a usable hex prefix.
+///
+/// INC-KOI025: `koi approve "$id"` with an empty `$id` applied all 334 pending
+/// proposals, because `"".starts_with("")` matches every id — a failed shell
+/// interpolation read as `--all`. An empty or non-hex id is never a valid
+/// prefix, so it is refused here rather than silently fanning out.
+fn validate_id_prefix(raw: &str) -> Result<&str> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        anyhow::bail!(
+            "invalid proposal id: empty. An empty id is not a wildcard — pass --all \
+             explicitly to act on every pending proposal."
+        );
+    }
+    if !trimmed.chars().all(|c| c.is_ascii_hexdigit()) {
+        anyhow::bail!(
+            "invalid proposal id {trimmed:?}: proposal ids are hex, so a prefix must be too."
+        );
+    }
+    Ok(trimmed)
+}
+
 fn run_approve(
     all: bool,
     dry_run: bool,
@@ -2177,12 +2199,13 @@ fn run_approve(
             sweepable
         }
     } else {
-        let Some(prefix) = id else {
+        let Some(raw) = id else {
             anyhow::bail!("usage: koi approve --all | koi approve <id-prefix>");
         };
+        let prefix = validate_id_prefix(&raw)?;
         pending
             .into_iter()
-            .filter(|p| p.id.0.starts_with(&prefix))
+            .filter(|p| p.id.0.starts_with(prefix))
             .collect()
     };
 
@@ -2289,12 +2312,13 @@ fn run_reject(id_prefix: Option<String>, all: bool, monitor: Option<String>) -> 
             .filter(|p| monitor.as_deref().is_none_or(|m| p.monitor == m))
             .collect()
     } else {
-        let Some(prefix) = id_prefix else {
+        let Some(raw) = id_prefix else {
             anyhow::bail!("usage: koi reject --all [--monitor <name>] | koi reject <id-prefix>");
         };
+        let prefix = validate_id_prefix(&raw)?;
         pending
             .into_iter()
-            .filter(|p| p.id.0.starts_with(&prefix))
+            .filter(|p| p.id.0.starts_with(prefix))
             .collect()
     };
 
@@ -2753,5 +2777,42 @@ mod git_repo_autoexclude_tests {
                 "loose reference material {loose} has no other backup and must stay included"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn empty_id_is_refused_rather_than_read_as_all() {
+        // INC-KOI025: this exact input applied 334 consent-gated proposals.
+        for raw in ["", " ", "\t", "\n  "] {
+            let err = validate_id_prefix(raw).unwrap_err().to_string();
+            assert!(
+                err.contains("empty"),
+                "{raw:?} must be refused as empty, got: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn non_hex_id_is_refused() {
+        for raw in ["--all", "zzzz", "57090b98!", "*"] {
+            assert!(
+                validate_id_prefix(raw).is_err(),
+                "{raw:?} is not a hex prefix and must be refused"
+            );
+        }
+    }
+
+    #[test]
+    fn a_real_hex_prefix_is_accepted_and_trimmed() {
+        assert_eq!(validate_id_prefix("57090b98").unwrap(), "57090b98");
+        assert_eq!(validate_id_prefix("  e6fdd1ee  ").unwrap(), "e6fdd1ee");
+        assert_eq!(
+            validate_id_prefix("57090b98b6020807").unwrap(),
+            "57090b98b6020807"
+        );
     }
 }
