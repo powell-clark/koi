@@ -46,6 +46,11 @@ desktop:
   # Desktop cleanup settings
   dry_run: true  # Default to dry-run mode for safety
   protected_files: []  # Files flagged by name to never archive (exact match)
+  # How long a file rests on the Desktop before DesktopMonitor archives it.
+  # The window exists so a fresh screenshot can be dragged into an agent
+  # before it moves; the cleanup timer runs every 5 minutes, so actual
+  # lifetime is this value rounded up to the next tick.
+  archive_age_minutes: 15
 
 # Service cost budgets
 budgets:
