@@ -4,7 +4,7 @@ After=network.target
 
 [Service]
 Type=oneshot
-ExecStart=%h/.local/bin/koi audit --quick
+ExecStart=%h/.cargo/bin/koi audit --quick
 WorkingDirectory=%h
 
 # CPU/IO constraints: avoid competing with interactive work
