@@ -22,7 +22,7 @@ use crate::{
 };
 
 /// Current schema version. Bump this when adding a migration.
-const CURRENT_VERSION: u32 = 6;
+const CURRENT_VERSION: u32 = 7;
 
 const MIGRATION_V1: &str = r#"
 CREATE TABLE IF NOT EXISTS monitor_reports (
@@ -187,6 +187,19 @@ CREATE INDEX IF NOT EXISTS idx_cost_snapshots_surface
     ON cost_snapshots(provider, project, period, captured_at DESC);
 "#;
 
+const MIGRATION_V7: &str = r#"
+CREATE TABLE IF NOT EXISTS inbox_items (
+    path        TEXT PRIMARY KEY,
+    first_seen  TEXT NOT NULL,
+    size_bytes  INTEGER,
+    inode       INTEGER
+);
+-- Renames are the way an item dodges aging: a new path looks new. The
+-- identity index lets a rename be recognised as the same item and keep its
+-- original first_seen (TASK-KOI241 pre-mortem).
+CREATE INDEX IF NOT EXISTS idx_inbox_items_identity ON inbox_items(inode, size_bytes);
+"#;
+
 fn migrate(conn: &Connection) -> Result<()> {
     let mut current: u32 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
     while current < CURRENT_VERSION {
@@ -198,6 +211,7 @@ fn migrate(conn: &Connection) -> Result<()> {
             4 => MIGRATION_V4,
             5 => MIGRATION_V5,
             6 => MIGRATION_V6,
+            7 => MIGRATION_V7,
             _ => return Err(Error::Config(format!("no migration for version {next}"))),
         };
         conn.execute_batch(sql)?;
@@ -1636,5 +1650,196 @@ mod cost_snapshot_tests {
         record_cost_snapshot(&conn, &snap("railway", 5.12, Utc::now())).unwrap();
         record_cost_snapshot(&conn, &snap("github-actions", 0.0, Utc::now())).unwrap();
         assert_eq!(latest_cost_snapshots(&conn).unwrap().len(), 2);
+    }
+}
+
+// -- inbox_items (TASK-KOI241) ---------------------------------------------
+
+/// One inbox item as koi first saw it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InboxItem {
+    pub path: String,
+    pub first_seen: DateTime<Utc>,
+    pub size_bytes: Option<i64>,
+    pub inode: Option<i64>,
+}
+
+/// Record an item's first sighting, or return the existing one untouched.
+///
+/// `first_seen` is immutable by design: it is the whole basis of aging, and a
+/// re-scan that refreshed it would reset every item's age to zero on every run,
+/// which is indistinguishable from an inbox that never accumulates.
+///
+/// A rename is recognised by (inode, size) and inherits the original
+/// `first_seen`, so moving a file inside the inbox does not launder its age.
+pub fn record_inbox_first_seen(
+    conn: &Connection,
+    path: &str,
+    now: DateTime<Utc>,
+    size_bytes: Option<i64>,
+    inode: Option<i64>,
+) -> Result<DateTime<Utc>> {
+    if let Some(existing) = inbox_first_seen(conn, path)? {
+        return Ok(existing);
+    }
+    // Same file, new name: carry the original date across.
+    let inherited = match (inode, size_bytes) {
+        (Some(ino), Some(size)) => conn
+            .query_row(
+                "SELECT first_seen FROM inbox_items WHERE inode = ?1 AND size_bytes = ?2 LIMIT 1",
+                rusqlite::params![ino, size],
+                |r| r.get::<_, String>(0),
+            )
+            .ok()
+            .and_then(|s| DateTime::parse_from_rfc3339(&s).ok())
+            .map(|d| d.with_timezone(&Utc)),
+        _ => None,
+    };
+    let first_seen = inherited.unwrap_or(now);
+    conn.execute(
+        "INSERT OR IGNORE INTO inbox_items (path, first_seen, size_bytes, inode)
+         VALUES (?1, ?2, ?3, ?4)",
+        rusqlite::params![path, first_seen.to_rfc3339(), size_bytes, inode],
+    )?;
+    Ok(first_seen)
+}
+
+pub fn inbox_first_seen(conn: &Connection, path: &str) -> Result<Option<DateTime<Utc>>> {
+    let found: Option<String> = conn
+        .query_row(
+            "SELECT first_seen FROM inbox_items WHERE path = ?1",
+            rusqlite::params![path],
+            |r| r.get(0),
+        )
+        .ok();
+    Ok(found
+        .and_then(|s| DateTime::parse_from_rfc3339(&s).ok())
+        .map(|d| d.with_timezone(&Utc)))
+}
+
+/// Every recorded inbox item, oldest first.
+pub fn inbox_items(conn: &Connection) -> Result<Vec<InboxItem>> {
+    let mut stmt = conn.prepare(
+        "SELECT path, first_seen, size_bytes, inode FROM inbox_items ORDER BY first_seen ASC",
+    )?;
+    let rows = stmt.query_map([], |r| {
+        let fs: String = r.get(1)?;
+        Ok(InboxItem {
+            path: r.get(0)?,
+            first_seen: DateTime::parse_from_rfc3339(&fs)
+                .map(|d| d.with_timezone(&Utc))
+                .unwrap_or_else(|_| Utc::now()),
+            size_bytes: r.get(2)?,
+            inode: r.get(3)?,
+        })
+    })?;
+    Ok(rows.filter_map(std::result::Result::ok).collect())
+}
+
+/// Forget items that are no longer on disk, so a filed item stops aging.
+pub fn forget_inbox_items(conn: &Connection, keep_paths: &[String]) -> Result<usize> {
+    let existing = inbox_items(conn)?;
+    let mut removed = 0;
+    for item in existing {
+        if !keep_paths.contains(&item.path) {
+            conn.execute(
+                "DELETE FROM inbox_items WHERE path = ?1",
+                rusqlite::params![item.path],
+            )?;
+            removed += 1;
+        }
+    }
+    Ok(removed)
+}
+
+#[cfg(test)]
+mod inbox_item_tests {
+    use super::*;
+
+    #[test]
+    fn first_seen_survives_a_rescan_unchanged() {
+        // AC-1. If a re-scan refreshed this, every item's age would reset to
+        // zero on every run and the inbox would never appear to accumulate —
+        // which is the exact blindness ADR-0018 was written about.
+        let conn = open_in_memory().unwrap();
+        let first = Utc::now() - chrono::Duration::days(40);
+        let recorded =
+            record_inbox_first_seen(&conn, "/inbox/a.pdf", first, Some(10), Some(1)).unwrap();
+        assert_eq!(recorded, first);
+
+        let much_later = Utc::now();
+        let second =
+            record_inbox_first_seen(&conn, "/inbox/a.pdf", much_later, Some(10), Some(1)).unwrap();
+        assert_eq!(second, first, "a re-scan must not refresh first_seen");
+
+        let items = inbox_items(&conn).unwrap();
+        assert_eq!(
+            items.len(),
+            1,
+            "a re-scan must not duplicate the row either"
+        );
+    }
+
+    #[test]
+    fn a_renamed_file_keeps_its_original_date() {
+        // The pre-mortem's failure mode: rename to dodge aging. Identity is
+        // (inode, size), so the new path inherits the old date.
+        let conn = open_in_memory().unwrap();
+        let first = Utc::now() - chrono::Duration::days(45);
+        record_inbox_first_seen(&conn, "/inbox/old-name.zip", first, Some(4096), Some(77)).unwrap();
+
+        let inherited = record_inbox_first_seen(
+            &conn,
+            "/inbox/new-name.zip",
+            Utc::now(),
+            Some(4096),
+            Some(77),
+        )
+        .unwrap();
+        assert_eq!(inherited, first, "a rename must not launder the item's age");
+    }
+
+    #[test]
+    fn a_genuinely_new_file_gets_todays_date() {
+        let conn = open_in_memory().unwrap();
+        let old = Utc::now() - chrono::Duration::days(45);
+        record_inbox_first_seen(&conn, "/inbox/a.zip", old, Some(4096), Some(77)).unwrap();
+
+        // Different inode and size: a different file, not a rename.
+        let now = Utc::now();
+        let fresh =
+            record_inbox_first_seen(&conn, "/inbox/b.zip", now, Some(999), Some(88)).unwrap();
+        assert_eq!(fresh, now);
+    }
+
+    #[test]
+    fn filed_items_stop_aging_once_they_leave_the_inbox() {
+        let conn = open_in_memory().unwrap();
+        let now = Utc::now();
+        record_inbox_first_seen(&conn, "/inbox/gone.pdf", now, Some(1), Some(1)).unwrap();
+        record_inbox_first_seen(&conn, "/inbox/stays.pdf", now, Some(2), Some(2)).unwrap();
+
+        let removed = forget_inbox_items(&conn, &["/inbox/stays.pdf".to_string()]).unwrap();
+        assert_eq!(removed, 1);
+        let left = inbox_items(&conn).unwrap();
+        assert_eq!(left.len(), 1);
+        assert_eq!(left[0].path, "/inbox/stays.pdf");
+    }
+
+    #[test]
+    fn items_come_back_oldest_first() {
+        let conn = open_in_memory().unwrap();
+        let now = Utc::now();
+        record_inbox_first_seen(&conn, "/inbox/new.pdf", now, Some(1), Some(1)).unwrap();
+        record_inbox_first_seen(
+            &conn,
+            "/inbox/old.pdf",
+            now - chrono::Duration::days(90),
+            Some(2),
+            Some(2),
+        )
+        .unwrap();
+        let items = inbox_items(&conn).unwrap();
+        assert_eq!(items[0].path, "/inbox/old.pdf");
     }
 }

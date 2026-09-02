@@ -3082,6 +3082,9 @@ fn run_check(json: bool) -> Result<()> {
         // koi watching its own units (TASK-KOI232): a dead .path unit reports
         // nothing on its own, which is how one sat unnoticed for five days.
         Box::new(UnitMonitor::new()),
+        // Inbox dating and aging (TASK-KOI241, ADR-0018): records first sight
+        // as a side effect of looking, which is what makes aging possible.
+        Box::new(koi_core::inbox_aging::InboxAgeMonitor::new().context("InboxAgeMonitor init")?),
     ];
 
     let reports: Vec<_> = monitors

@@ -12,6 +12,7 @@ pub mod error;
 pub mod filing;
 pub mod fleet;
 pub mod fs_size;
+pub mod inbox_aging;
 pub mod monitor;
 pub mod monitors;
 pub mod notes;
