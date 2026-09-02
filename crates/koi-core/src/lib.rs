@@ -10,6 +10,7 @@ pub mod cost;
 pub mod dedupe;
 pub mod error;
 pub mod filing;
+pub mod fleet;
 pub mod fs_size;
 pub mod monitor;
 pub mod monitors;

@@ -145,6 +145,8 @@ enum Command {
     ///
     /// Example: `koi completions bash > ~/.local/share/bash-completion/completions/koi`
     Completions { shell: Shell },
+    /// Show this machine's place in the declared fleet (TASK-KOI158).
+    Fleet,
     /// Subscription and renewal register (TASK-KOI239).
     Costs {
         #[command(subcommand)]
@@ -314,6 +316,7 @@ fn main() -> Result<()> {
             let mut cmd = Cli::command();
             generate(shell, &mut cmd, "koi", &mut std::io::stdout());
         }
+        Command::Fleet => run_fleet()?,
         Command::Costs { action } => run_costs(action)?,
         Command::Cost { refresh, json } => run_cost(refresh, json)?,
         Command::Zones { root } => run_zones(root)?,
@@ -983,6 +986,80 @@ fn receipt_text(path: &std::path::Path) -> Option<String> {
     out.status
         .success()
         .then(|| String::from_utf8_lossy(&out.stdout).to_string())
+}
+
+fn run_fleet() -> Result<()> {
+    use koi_core::fleet::{current_hostname, FleetConfig};
+
+    let config = FleetConfig::load();
+    let path = FleetConfig::default_path()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|_| "~/.config/koi/fleet.toml".to_string());
+
+    if config.machines.is_empty() {
+        println!("No fleet declared ({path} is absent or empty).");
+        println!();
+        println!("A fleet config says which machines you run, what they should share,");
+        println!("and what they are deliberately allowed to differ on.");
+        println!("An annotated example ships at share/examples/fleet.toml.");
+        return Ok(());
+    }
+
+    let Some(host) = current_hostname() else {
+        println!("Fleet declared, but this machine's hostname could not be read.");
+        return Ok(());
+    };
+
+    println!("Fleet ({} machine(s) declared)", config.machines.len());
+    println!();
+
+    match config.machine(&host) {
+        None => {
+            // Not an error: a machine may legitimately be outside the fleet.
+            println!("This machine ({host}) is NOT declared in the fleet.");
+            println!("koi will not compare it against anything.");
+        }
+        Some(me) => {
+            let label = me.label.as_deref().unwrap_or("-");
+            println!("This machine: {host}  ({}, {label})", me.os);
+
+            let classes = config.classes_for(&host);
+            if classes.is_empty() {
+                println!("  Equivalence classes: none — nothing is expected to match.");
+            } else {
+                println!("  Equivalence classes:");
+                for c in &classes {
+                    println!(
+                        "    {:<12} {:<14} with {}",
+                        c.name,
+                        c.kind,
+                        c.machines.join(", ")
+                    );
+                }
+            }
+
+            let peers = config.peers_of(&host);
+            if !peers.is_empty() {
+                println!("  Peers: {}", peers.join(", "));
+            }
+
+            let divergences = config.divergences_for(&host);
+            if divergences.is_empty() {
+                println!("  Declared divergences: none.");
+            } else {
+                println!("  Declared divergences (koi will never propose to change these):");
+                for (key, reason) in &divergences {
+                    println!("    {key} — {}", reason.unwrap_or("no reason recorded"));
+                }
+            }
+        }
+    }
+
+    println!();
+    println!(
+        "  Comparison and proposals are TASK-KOI159; this command only reports the declaration."
+    );
+    Ok(())
 }
 
 fn run_costs(action: CostsAction) -> Result<()> {

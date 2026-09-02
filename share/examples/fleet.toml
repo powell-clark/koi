@@ -1,0 +1,55 @@
+# koi fleet configuration — copy to ~/.config/koi/fleet.toml and edit.
+#
+# Declares which machines you run, what they are expected to share, and what
+# they are deliberately allowed to differ on. koi reads it; TASK-KOI159 will
+# compare declared against actual and raise proposals through the normal
+# consent loop. Nothing here is applied automatically to any machine.
+#
+# A missing file is fine and silent — most machines are not in a fleet.
+
+# ---- machines -------------------------------------------------------------
+# `hostname` is matched against the live hostname, case-insensitively.
+
+[[machines]]
+hostname = "workstation"
+os = "linux"
+label = "Primary Linux desktop"
+
+[[machines]]
+hostname = "laptop"
+os = "macos"
+label = "Travel machine"
+
+[[machines]]
+hostname = "windows-box"
+os = "windows"
+
+# ---- equivalence classes --------------------------------------------------
+# Which machines should share which kind of state. `kind` is free text so a
+# new check does not need a schema change; the checks that ship first are
+# shell-config, packages and dotfiles.
+
+[[equivalence]]
+name = "shell"
+kind = "shell-config"
+machines = ["workstation", "laptop"]
+
+[[equivalence]]
+name = "cli-tools"
+kind = "packages"
+machines = ["workstation", "laptop", "windows-box"]
+
+# ---- divergence rules -----------------------------------------------------
+# Settings that are deliberately different on one machine. koi must never
+# propose to bring these into line. Give a reason: it is what stops a future
+# reader "fixing" a decision you made on purpose.
+
+[[divergence]]
+hostname = "laptop"
+key = "swap.size_gb"
+reason = "smaller disk; a matching swap would not fit"
+
+[[divergence]]
+hostname = "windows-box"
+key = "shell.default"
+reason = "PowerShell here, zsh elsewhere — not worth unifying"
