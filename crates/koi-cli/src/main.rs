@@ -434,13 +434,22 @@ fn run_audit(quick: bool) -> Result<()> {
     // defaults this to /var/log/lynis-report.dat, which is root-only and so
     // unreadable on the non-root path this command actively supports.
     let report_dat_path = audits_dir.join(format!("lynis-{ts_str}.dat"));
+    let report_log_path = audits_dir.join(format!("lynis-{ts_str}.lynis.log"));
 
     let mut cmd = std::process::Command::new("lynis");
     cmd.arg("audit")
         .arg("system")
         .arg("--no-colors")
         .arg("--report-file")
-        .arg(&report_dat_path);
+        .arg(&report_dat_path)
+        // --logfile matters as much as --report-file. Lynis defaults its log
+        // to /var/log/lynis.log and, running unprivileged, falls back to the
+        // working directory — which for koi-audit-quick.service is %h. That is
+        // why ~/lynis.log kept reappearing at HOME root and why
+        // RootClutterMonitor kept proposing to move it (TASK-KOI225): the
+        // proposal was treating a symptom whose writer was still live.
+        .arg("--logfile")
+        .arg(&report_log_path);
     if quick {
         cmd.args([
             "--tests-from-group",
