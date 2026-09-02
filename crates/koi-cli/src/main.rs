@@ -605,14 +605,63 @@ Report: {}",
             "normal"
         };
 
-    let _ = std::process::Command::new("notify-send")
-        .args([
-            "--app-name=koi",
-            &format!("--urgency={urgency}"),
-            "Koi Security Audit",
-            &body,
-        ])
-        .status();
+    notify_with_open_action(urgency, "Koi Security Audit", &body, report_path);
+}
+
+/// Raise the audit notification with an "Open report" action (TASK-KOI060 AC-5).
+///
+/// # Why this is detached, and why that was the whole problem
+///
+/// `notify-send --action` documents "Implies --wait to wait for user input".
+/// The audit ran it with `.status()`, which waits for the child, so adding an
+/// action button would have hung `koi-audit-quick.service` at 04:00 on a Sunday
+/// until somebody clicked. TASK-KOI060 was rejected on exactly that ground.
+///
+/// Measured 2026-09-02 rather than reasoned about: `--wait` blocks the
+/// notify-send PROCESS, not its caller. Detached through `setsid`, the parent
+/// returned in 2ms while notify-send stayed alive holding the notification open.
+/// Evidence in `.claude/evidence/TASK-KOI060.md`.
+///
+/// So the helper is one detached shell that waits for the click and opens the
+/// report, and koi returns immediately. If anything in that chain is missing the
+/// notification still fires — the action is the part that degrades, not the
+/// alert.
+fn notify_with_open_action(urgency: &str, title: &str, body: &str, report_path: &std::path::Path) {
+    let report = report_path.display().to_string();
+    // Single-quoted for sh, with any embedded quote escaped: a report path is
+    // koi's own timestamped filename, but building a shell string without
+    // escaping is how that stops being true later.
+    let quoted = shell_quote(&report);
+    let script = format!(
+        "action=$(notify-send --app-name=koi --urgency={urgency} --action='open=Open report' {title} {body}); \
+         [ \"$action\" = open ] && xdg-open {quoted} >/dev/null 2>&1",
+        title = shell_quote(title),
+        body = shell_quote(body),
+    );
+
+    let spawned = std::process::Command::new("setsid")
+        .args(["--fork", "sh", "-c", &script])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn();
+
+    if spawned.is_err() {
+        // No setsid: fall back to the plain notification koi has always sent,
+        // without an action, rather than losing the alert entirely.
+        let _ = std::process::Command::new("notify-send")
+            .args([
+                "--app-name=koi",
+                &format!("--urgency={urgency}"),
+                title,
+                body,
+            ])
+            .status();
+    }
+}
+
+fn shell_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', r"'\''"))
 }
 
 /// Say WHY there is no hardening index, distinguishing the three cases that
@@ -3574,5 +3623,42 @@ mod tests {
         // Lynis writes both keys; a prefix match would return the older score.
         let dat = "hardening_index_previous=42\nhardening_index=18\n";
         assert_eq!(parse_report_hardening_index(dat), Some(18));
+    }
+
+    #[test]
+    fn shell_quoting_neutralises_an_embedded_quote() {
+        assert_eq!(shell_quote("plain"), "'plain'");
+        assert_eq!(shell_quote("with space"), "'with space'");
+        assert_eq!(shell_quote("it's"), r"'it'\''s'");
+    }
+
+    #[test]
+    fn a_quoted_string_reaches_sh_as_one_literal_argument() {
+        // Stronger than pattern-matching the escaped form, which is easy to
+        // assert wrongly: hand the quoted string to a real shell and require
+        // that what comes back is byte-identical to what went in. If the
+        // quoting leaked, sh would split it or execute part of it.
+        for payload in [
+            "plain",
+            "with space",
+            "it's",
+            "'; echo INJECTED; '",
+            "path/with'quote/and space.log",
+        ] {
+            let script = format!("printf %s {}", shell_quote(payload));
+            let out = std::process::Command::new("sh")
+                .args(["-c", &script])
+                .output()
+                .expect("sh must be available");
+            assert_eq!(
+                String::from_utf8_lossy(&out.stdout),
+                payload,
+                "sh did not receive {payload:?} intact"
+            );
+            assert!(
+                !String::from_utf8_lossy(&out.stdout).contains("INJECTED\n"),
+                "payload executed rather than being quoted"
+            );
+        }
     }
 }
