@@ -24,6 +24,7 @@ Never block waiting on the operator — record what is needed and continue with 
 - Monitor thresholds: config/thresholds.yaml. Safe-to-clean and protected paths: config/exclusions.yaml
 - Purpose, vision, mission: CONSCIOUSNESS/identity-vision-mission.md. Live roadmap: /consciousness:pgps
 - Machine history: data/incidents.jsonl and data/worklog.jsonl (`koi incidents`, `koi worklog`)
+- Runtime config koi actually reads lives in `~/.config/koi/` and is TOML — filing.toml, cost.toml, backup.toml, subscriptions.toml, fleet.toml. New settings go there in TOML; koi never reads config from its own source tree. `config/thresholds.yaml` and `config/exclusions.yaml` are Python-prototype era and are read by no Rust code.
 </state-sources>
 
 <incident-and-work-logs>
