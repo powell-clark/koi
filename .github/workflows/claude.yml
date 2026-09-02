@@ -1,0 +1,90 @@
+name: claude
+
+# Interactive @claude responder. Someone with write access mentions @claude in
+# an issue, a comment or a review, and Claude answers in that thread.
+#
+# Ported from amalavijnana/consciousness (TASK-KOI141), deliberately lean: koi
+# is a Rust repo with no pnpm tree, no self-hosted runner and no PGPS CLIs, so
+# the ccc version's Node setup, runner routing and transcript pipeline are all
+# dropped rather than carried across dead.
+
+on:
+  issue_comment:
+    types: [created]
+  pull_request_review_comment:
+    types: [created]
+  issues:
+    types: [opened, assigned]
+  pull_request_review:
+    types: [submitted]
+
+jobs:
+  claude:
+    # Two independent gates, both of which must hold.
+    #
+    # 1. The kill switch. `gh variable set CLAUDE_CI_ENABLED --body false`
+    #    stands every Claude workflow down without editing yaml.
+    # 2. Author association. This repo is PUBLIC and `issues` /
+    #    `issue_comment` run in the base-repo context WITH access to secrets,
+    #    so without this gate any stranger could spend the operator's Claude
+    #    budget by opening an issue. OWNER/MEMBER/COLLABORATOR is the set that
+    #    already has write access, so it grants nothing new.
+    if: |
+      vars.CLAUDE_CI_ENABLED != 'false' &&
+      ((github.event_name == 'issue_comment' && contains(github.event.comment.body, '@claude') &&
+        (github.event.comment.author_association == 'OWNER' || github.event.comment.author_association == 'MEMBER' || github.event.comment.author_association == 'COLLABORATOR')) ||
+       (github.event_name == 'pull_request_review_comment' && contains(github.event.comment.body, '@claude') &&
+        (github.event.comment.author_association == 'OWNER' || github.event.comment.author_association == 'MEMBER' || github.event.comment.author_association == 'COLLABORATOR')) ||
+       (github.event_name == 'pull_request_review' && contains(github.event.review.body, '@claude') &&
+        (github.event.review.author_association == 'OWNER' || github.event.review.author_association == 'MEMBER' || github.event.review.author_association == 'COLLABORATOR')) ||
+       (github.event_name == 'issues' && contains(github.event.issue.body, '@claude') &&
+        (github.event.issue.author_association == 'OWNER' || github.event.issue.author_association == 'MEMBER' || github.event.issue.author_association == 'COLLABORATOR')))
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    # Interactive lane, keyed per thread. A reply must never queue behind a
+    # minutes-long autonomous fix attempt, which is why solve-issue and the
+    # adversarial review share a different group.
+    concurrency:
+      group: claude-interactive-${{ github.event.issue.number || github.event.pull_request.number || github.run_id }}
+      cancel-in-progress: false
+
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+      id-token: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      # koi is Rust: the agent needs a toolchain to build or test anything it
+      # proposes. Pinned to match ci.yml so a fix it verifies here is a fix
+      # that passes there.
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.91.0
+          components: rustfmt, clippy
+
+      - name: Cache cargo deps
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: claude-agent
+
+      - name: Run Claude
+        uses: anthropics/claude-code-action@v1
+        with:
+          # Subscription token by default; the API key is the metered fallback
+          # so the workflow still runs if only that is configured.
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          anthropic_api_key: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN == '' && secrets.ANTHROPIC_API_KEY || '' }}
+          claude_args: "--model sonnet --fallback-model haiku --max-budget-usd 5.00 --max-turns 60"
+
+      # Deliberately no transcript artefact. The ccc version uploads one and
+      # needs a redaction script to keep credentials out of it, because Actions
+      # log masking does not cover a JSON blob written to disk. Not uploading
+      # removes that surface rather than guarding it.

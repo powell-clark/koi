@@ -1,0 +1,87 @@
+name: claude-adversarial-review
+
+# Adversarial review of a pull request diff: look for the bug, not the typo.
+#
+# Ported from amalavijnana/consciousness (TASK-KOI141).
+#
+# SECURITY NOTE. The trigger is `pull_request`, never `pull_request_target`.
+# On a public repo a fork PR running under `pull_request` gets NO secrets, so a
+# malicious PR cannot reach the Claude token. The cost is that fork PRs are not
+# reviewed automatically; a maintainer runs `workflow_dispatch` for those after
+# reading the diff. That trade is deliberate: `pull_request_target` with
+# secrets and a checkout of untrusted code is the standard way public repos
+# leak credentials.
+
+on:
+  pull_request:
+    types: [opened, synchronize, ready_for_review]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: "Pull request number to review"
+        required: true
+        type: string
+
+jobs:
+  adversarial-review:
+    if: |
+      vars.CLAUDE_CI_ENABLED != 'false' &&
+      (github.event_name == 'workflow_dispatch' || github.event.pull_request.draft == false)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    # Batch lane, shared with solve-issue. Keyed per PR, and here
+    # cancel-in-progress IS true: a review of a superseded push has no value,
+    # and unlike solve-issue this job pushes nothing that could be stranded.
+    concurrency:
+      group: claude-batch-pr-${{ github.event.pull_request.number || inputs.pr_number || github.run_id }}
+      cancel-in-progress: true
+
+    permissions:
+      contents: read
+      pull-requests: write
+      id-token: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.91.0
+          components: rustfmt, clippy
+
+      - name: Cache cargo deps
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: claude-agent
+
+      - name: Adversarial review
+        uses: anthropics/claude-code-action@v1
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number || inputs.pr_number }}
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          anthropic_api_key: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN == '' && secrets.ANTHROPIC_API_KEY || '' }}
+          prompt: |
+            Adversarially review ${{ github.repository }} PR #${{ env.PR_NUMBER }}.
+            Read the diff with `gh pr diff ${{ env.PR_NUMBER }}`.
+
+            Hunt for defects that survive a careful read: logic that is wrong
+            for an input nobody tried, a consent or safety guard weakened as a
+            side effect, an error path that swallows a failure, a test that
+            asserts nothing. koi files the operator's real documents and runs
+            as a daemon on their machine, so anything that could move or delete
+            a user file without an approval is the highest-severity class here.
+
+            Verify before asserting: run `cargo test --workspace` and
+            `cargo clippy --workspace --all-targets -- -D warnings` rather than
+            reasoning about whether they would pass. Report only findings you
+            can state as a concrete failing scenario. If the diff is sound, say
+            so plainly and briefly rather than inventing nits.
+
+            Post the review as a single PR comment.
+          claude_args: "--model sonnet --fallback-model haiku --max-budget-usd 5.00 --max-turns 80"

@@ -1,0 +1,82 @@
+name: claude-solve-issue
+
+# Label-gated autonomous fix attempt: an issue tagged `claude-fix` gets a draft
+# PR. Opt-in by design — it never fires on every opened issue, which caps both
+# spend and rate-limit contention with interactive use.
+#
+# Ported from amalavijnana/consciousness (TASK-KOI141).
+
+on:
+  issues:
+    types: [labeled]
+  workflow_dispatch:
+    inputs:
+      issue_number:
+        description: "Issue number to attempt a fix for"
+        required: true
+        type: string
+
+jobs:
+  solve-issue:
+    # The label is the gate, and only someone with write access can apply a
+    # label to an issue on a public repo — so labelling is itself the
+    # trust check that `claude.yml` has to make explicitly.
+    if: |
+      vars.CLAUDE_CI_ENABLED != 'false' &&
+      (github.event_name == 'workflow_dispatch' || github.event.label.name == 'claude-fix')
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    # Batch lane, shared with the adversarial review. Per-issue key so two
+    # different issues can be worked at once, and cancel-in-progress stays
+    # false because this job pushes: killing it mid-flight can strand pushed
+    # work with no PR to record it.
+    concurrency:
+      group: claude-batch-${{ github.event.issue.number || inputs.issue_number || github.run_id }}
+      cancel-in-progress: false
+
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+      id-token: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.91.0
+          components: rustfmt, clippy
+
+      - name: Cache cargo deps
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: claude-agent
+
+      - name: Attempt fix and open a draft PR
+        uses: anthropics/claude-code-action@v1
+        env:
+          ISSUE_NUMBER: ${{ github.event.issue.number || inputs.issue_number }}
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          anthropic_api_key: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN == '' && secrets.ANTHROPIC_API_KEY || '' }}
+          allowed_bots: "dependabot[bot],github-actions[bot]"
+          prompt: |
+            Read ${{ github.repository }} issue #${{ env.ISSUE_NUMBER }} with `gh issue view`.
+
+            Attempt a fix on a new branch and open a DRAFT pull request against dev.
+            This is a Rust workspace: `cargo test --workspace`,
+            `cargo clippy --workspace --all-targets -- -D warnings` and
+            `cargo fmt --check` must all pass before you open the PR. If you
+            cannot make them pass, say so in a comment on the issue and open
+            nothing.
+
+            Follow AGENTS.md. Commits carry
+            `Authored-By: Emmanuel Powell-Clark <emmanuel@powellclark.com>`
+            and no AI attribution.
+          claude_args: "--model sonnet --fallback-model haiku --max-budget-usd 10.00 --max-turns 150"
