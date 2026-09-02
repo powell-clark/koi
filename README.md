@@ -6,10 +6,14 @@ ever with your consent. It's early: the CLI and core monitors run today (Linux-f
 the daemon and system tray app are mid-build, and macOS/Windows support is on the
 roadmap rather than shipped.
 
-[![CI](https://github.com/powell-clark/koi/actions/workflows/ci.yml/badge.svg)](https://github.com/powell-clark/koi/actions/workflows/ci.yml)
+[![CI (Linux, macOS, Windows)](https://github.com/powell-clark/koi/actions/workflows/ci.yml/badge.svg)](https://github.com/powell-clark/koi/actions/workflows/ci.yml)
 [![secret-scan](https://github.com/powell-clark/koi/actions/workflows/secret-scan.yml/badge.svg)](https://github.com/powell-clark/koi/actions/workflows/secret-scan.yml)
 [![License: FSL-1.1-Apache-2.0](https://img.shields.io/badge/license-FSL--1.1--Apache--2.0-blue)](LICENSE)
-![platforms: linux | macos | windows](https://img.shields.io/badge/platforms-linux%20%7C%20macos%20%7C%20windows-informational)
+[![platforms: linux | macos | windows](https://img.shields.io/badge/platforms-linux%20%7C%20macos%20%7C%20windows-informational)](https://github.com/powell-clark/koi/actions/workflows/ci.yml)
+
+The CI badge covers all three platforms: `fmt`, `clippy -D warnings` and the test
+suite run on `ubuntu-latest`, `macos-latest` and `windows-latest` with
+`fail-fast: false`, so the badge is green only when every platform is.
 
 Named after koi fish: they live in the pond and keep the ecosystem clear as part of
 their nature, while the pond's keeper sets the boundaries. You work, create files, run
