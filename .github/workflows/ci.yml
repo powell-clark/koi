@@ -10,7 +10,7 @@ name: ci
 
 on:
   push:
-    branches: [main]
+    branches: [main, dev]
     # Skip Rust builds for docs-only pushes to main.
     paths-ignore:
       - 'docs/**'
