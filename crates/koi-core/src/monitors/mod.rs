@@ -12,6 +12,7 @@ pub mod memory;
 pub mod model_size;
 pub mod network;
 pub mod package;
+pub mod units;
 pub mod wezterm;
 pub mod wezterm_crash;
 
@@ -26,5 +27,6 @@ pub use memory::MemoryMonitor;
 pub use model_size::ModelSizeMonitor;
 pub use network::NetworkMonitor;
 pub use package::PackageMonitor;
+pub use units::UnitMonitor;
 pub use wezterm::{process_family_stats, FamilyStats, WezTermMonitor};
 pub use wezterm_crash::DetectedCrash;

@@ -12,7 +12,7 @@ use koi_core::{
     monitors::{
         BackupMonitor, CacheMonitor, DiskMonitor, DockerMonitor, GhosttyMonitor, GitMonitor,
         LatencyMonitor, MemoryMonitor, ModelSizeMonitor, NetworkMonitor, PackageMonitor,
-        WezTermMonitor,
+        UnitMonitor, WezTermMonitor,
     },
     notes, state, trash,
     types::HealthStatus,
@@ -2971,6 +2971,9 @@ fn run_check(json: bool) -> Result<()> {
         // `koi cost --refresh`, because a network round trip does not fit the
         // 200ms monitor budget (TASK-KOI238).
         Box::new(koi_core::cost::CostMonitor::new()),
+        // koi watching its own units (TASK-KOI232): a dead .path unit reports
+        // nothing on its own, which is how one sat unnoticed for five days.
+        Box::new(UnitMonitor::new()),
     ];
 
     let reports: Vec<_> = monitors
