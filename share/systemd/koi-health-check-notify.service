@@ -1,0 +1,31 @@
+[Unit]
+Description=Notify when the koi health check itself fails
+Documentation=https://github.com/powell-clark/koi
+
+# Why this unit exists (TASK-KOI253).
+#
+# koi-health-check.service runs UnitMonitor, which reports any koi user unit
+# that is failed or has stopped watching (TASK-KOI232). It cannot report its
+# own unit failing: a check that fails is exactly as silent as the thing it
+# watches. That gap is the whole reason koi-screenshot-relay.path sat dead for
+# five days (TASK-KOI231) and koi-audit-quick.service sat failed through the
+# same investigation.
+#
+# So the watcher has to live OUTSIDE the unit, which is what OnFailure= gives:
+# systemd starts this unit when that one fails, including a start failure such
+# as the 203/EXEC that TASK-KOI230 fixed — the case an ExecStopPost= inside the
+# unit could never catch, because a unit that fails to exec never reaches it.
+
+[Service]
+Type=oneshot
+
+# urgency normal rather than critical, matching koi-backup-notify's 2026-08-17
+# correction (INC-KOI023): on GNOME a critical notification is sticky and stays
+# until dismissed by hand, which is what turns a recurring failure into nagging.
+# A failed health check is worth knowing about, not worth blocking the screen.
+ExecStart=/usr/bin/notify-send --app-name=koi --urgency=normal \
+  "Koi health check failed" \
+  "koi-health-check.service did not complete. Run: systemctl --user status koi-health-check.service"
+
+[Install]
+WantedBy=default.target
