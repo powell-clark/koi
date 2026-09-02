@@ -69,6 +69,12 @@ on Linux and an NSIS `-setup.exe` on Windows, downloadable as run artefacts.
 They are unsigned. macOS is not yet shipped: a `.dmg` builds in the same
 workflow, but nothing on macOS has been installed or tested on real hardware.
 
+## See it work
+
+[**One cycle, start to finish**](docs/showcase.md) — a file lands in Downloads,
+koi proposes a destination, you approve, it moves, the decision is recorded.
+Every command on that page was run against a scratch directory.
+
 ## Usage
 
 ```bash
