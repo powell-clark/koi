@@ -147,7 +147,7 @@ impl Monitor for GitMonitor {
     }
 }
 
-fn find_git_repos(root: &Path, max_depth: usize) -> Vec<PathBuf> {
+pub fn find_git_repos(root: &Path, max_depth: usize) -> Vec<PathBuf> {
     let mut out = Vec::new();
     if !root.exists() {
         return out;

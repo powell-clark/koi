@@ -145,6 +145,16 @@ enum Command {
     ///
     /// Example: `koi completions bash > ~/.local/share/bash-completion/completions/koi`
     Completions { shell: Shell },
+    /// Git-object hygiene across ~/projects — counts loose objects and, with
+    /// --apply, runs a conservative gc (TASK-KOI234).
+    GitGc {
+        /// Actually run the gc. Without this, nothing is changed.
+        #[arg(long)]
+        apply: bool,
+        /// Loose-object count above which a repo is collected.
+        #[arg(long, default_value_t = koi_core::cleaners::git_objects::DEFAULT_LOOSE_THRESHOLD)]
+        threshold: u64,
+    },
     /// Show this machine's place in the declared fleet (TASK-KOI158).
     Fleet,
     /// Subscription and renewal register (TASK-KOI239).
@@ -316,6 +326,7 @@ fn main() -> Result<()> {
             let mut cmd = Cli::command();
             generate(shell, &mut cmd, "koi", &mut std::io::stdout());
         }
+        Command::GitGc { apply, threshold } => run_git_gc(apply, threshold)?,
         Command::Fleet => run_fleet()?,
         Command::Costs { action } => run_costs(action)?,
         Command::Cost { refresh, json } => run_cost(refresh, json)?,
@@ -995,6 +1006,103 @@ fn receipt_text(path: &std::path::Path) -> Option<String> {
     out.status
         .success()
         .then(|| String::from_utf8_lossy(&out.stdout).to_string())
+}
+
+fn run_git_gc(apply: bool, threshold: u64) -> Result<()> {
+    use koi_core::cleaners::git_objects::{collect, survey, RepoVerdict};
+
+    let home = koi_core::state::home_dir()?;
+    let repos = koi_core::monitors::git::find_git_repos(&home.join("projects"), 3);
+    if repos.is_empty() {
+        println!(
+            "No git repositories found under {}/projects.",
+            home.display()
+        );
+        return Ok(());
+    }
+
+    let statuses = survey(&repos, threshold);
+    let mut to_collect = Vec::new();
+    let mut skipped = Vec::new();
+    let mut total_loose = 0u64;
+
+    for st in &statuses {
+        total_loose += st.loose_objects;
+        match st.verdict {
+            RepoVerdict::Collect => to_collect.push(st),
+            RepoVerdict::MidOperation(op) => skipped.push((st, op)),
+            RepoVerdict::BelowThreshold => {}
+        }
+    }
+
+    println!(
+        "Surveyed {} repo(s) under ~/projects — {total_loose} loose object(s) in total.",
+        statuses.len()
+    );
+    println!("Threshold: {threshold} loose objects.");
+    println!();
+
+    if to_collect.is_empty() && skipped.is_empty() {
+        println!("Nothing above the threshold. No repo needs collecting.");
+        return Ok(());
+    }
+
+    if !skipped.is_empty() {
+        // Named rather than silently dropped: a repo skipped for a rebase is
+        // information the operator wants, not noise.
+        println!("Skipped — an operation is in flight:");
+        for (st, op) in &skipped {
+            println!(
+                "  {:<44} {:>6} loose  ({op} in progress)",
+                st.path.display().to_string(),
+                st.loose_objects
+            );
+        }
+        println!();
+    }
+
+    if to_collect.is_empty() {
+        return Ok(());
+    }
+
+    println!("Above threshold:");
+    for st in &to_collect {
+        println!(
+            "  {:<44} {:>6} loose",
+            st.path.display().to_string(),
+            st.loose_objects
+        );
+    }
+    println!();
+
+    if !apply {
+        println!("DRY RUN — nothing changed. Re-run with --apply to collect these.");
+        println!("  gc runs with --prune=2.days.ago; koi never prunes to now, because");
+        println!("  another session can be mid-commit in a repo being collected.");
+        return Ok(());
+    }
+
+    println!("Collecting…");
+    for st in &to_collect {
+        let before = st.loose_objects;
+        match collect(&st.path) {
+            Ok(true) => {
+                let after =
+                    koi_core::cleaners::git_objects::count_loose(&st.path).unwrap_or(before);
+                println!(
+                    "  {:<44} {before:>6} -> {after}",
+                    st.path.display().to_string()
+                );
+            }
+            Ok(false) | Err(_) => {
+                println!(
+                    "  {:<44} gc FAILED — left alone",
+                    st.path.display().to_string()
+                );
+            }
+        }
+    }
+    Ok(())
 }
 
 fn run_fleet() -> Result<()> {

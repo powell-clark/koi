@@ -4,6 +4,8 @@
 //! download time. No user files are ever touched here; user-file mutations go
 //! through the FileMonitor proposal pipeline.
 
+pub mod git_objects;
+
 use crate::fs_size::dir_size;
 use std::{
     fs,
