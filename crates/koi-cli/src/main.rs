@@ -128,6 +128,17 @@ enum Command {
     ///
     /// Example: `koi completions bash > ~/.local/share/bash-completion/completions/koi`
     Completions { shell: Shell },
+    /// Show cost posture per surface; --refresh reads the billing APIs first.
+    Cost {
+        /// Call the Railway and GitHub billing APIs and persist a fresh
+        /// snapshot. Without this flag the command only reads what is stored,
+        /// so it is safe to run in a loop.
+        #[arg(long)]
+        refresh: bool,
+        /// Emit machine-readable JSON.
+        #[arg(long)]
+        json: bool,
+    },
     /// List detected managed zones — directories claimed by other systems via
     /// `.koi-managed-by` markers, which koi will not touch.
     Zones {
@@ -281,6 +292,7 @@ fn main() -> Result<()> {
             let mut cmd = Cli::command();
             generate(shell, &mut cmd, "koi", &mut std::io::stdout());
         }
+        Command::Cost { refresh, json } => run_cost(refresh, json)?,
         Command::Zones { root } => run_zones(root)?,
         Command::Worklog { limit } => run_jsonl_tail(
             &state::default_data_dir()?.join("worklog.jsonl"),
@@ -863,6 +875,171 @@ fn run_jsonl_tail(path: &std::path::Path, limit: usize, label: &str) -> Result<(
             }
         }
     }
+    Ok(())
+}
+
+/// Read a secret from the runtime home. Never the repo, never an argument —
+/// an argument would put the token in the process table and the shell history.
+fn read_cost_secret(name: &str) -> Option<String> {
+    let home = koi_core::state::home_dir().ok()?;
+    let path = home.join(".config/koi/secrets").join(name);
+    let raw = std::fs::read_to_string(path).ok()?;
+    let trimmed = raw.trim().to_string();
+    (!trimmed.is_empty()).then_some(trimmed)
+}
+
+/// koi already shells out to rclone, railway, systemctl and lynis, so curl is
+/// the idiom here too and costs no new dependency on a public repo.
+fn http_post_json(url: &str, token: &str, body: &str) -> Result<String> {
+    let out = std::process::Command::new("curl")
+        .args([
+            "-sS",
+            "--max-time",
+            "20",
+            "-X",
+            "POST",
+            url,
+            "-H",
+            "Content-Type: application/json",
+            // The token goes in an argument to curl, not to a shell, so it is
+            // not expanded or logged by koi. It is visible in this process's
+            // own argv for the lifetime of the call, which is the same
+            // exposure the railway CLI already has.
+            "-H",
+            &format!("Authorization: Bearer {token}"),
+            "--data-binary",
+            body,
+        ])
+        .output()
+        .context("curl not available — install it or set the surface aside")?;
+    if !out.status.success() {
+        anyhow::bail!(
+            "curl failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).to_string())
+}
+
+fn http_get_json(url: &str, token: &str) -> Result<String> {
+    let out = std::process::Command::new("curl")
+        .args([
+            "-sS",
+            "--max-time",
+            "20",
+            url,
+            "-H",
+            "Accept: application/vnd.github+json",
+            "-H",
+            &format!("Authorization: Bearer {token}"),
+        ])
+        .output()
+        .context("curl not available — install it or set the surface aside")?;
+    if !out.status.success() {
+        anyhow::bail!(
+            "curl failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).to_string())
+}
+
+fn current_period() -> String {
+    chrono::Utc::now().format("%Y-%m").to_string()
+}
+
+fn run_cost(refresh: bool, json: bool) -> Result<()> {
+    use koi_core::cost::{self, CostBudgets};
+
+    let period = current_period();
+
+    if refresh {
+        let mut taken = 0usize;
+
+        match read_cost_secret("railway-token") {
+            None => println!("railway: no token at ~/.config/koi/secrets/railway-token — skipped."),
+            Some(token) => {
+                let query =
+                    r#"{"query":"query { usage { projects { name estimatedCostCents } } }"}"#;
+                match http_post_json("https://backboard.railway.com/graphql/v2", &token, query)
+                    .and_then(|body| {
+                        cost::parse_railway_usage(&body, &period).map_err(anyhow::Error::msg)
+                    }) {
+                    Ok(snaps) => {
+                        let conn = open_state()?;
+                        for s in &snaps {
+                            koi_core::state::record_cost_snapshot(&conn, s)?;
+                            taken += 1;
+                        }
+                    }
+                    // A surface that cannot be read is reported and skipped:
+                    // one broken token must not stop the other surface.
+                    Err(e) => println!("railway: {e}"),
+                }
+            }
+        }
+
+        match (read_cost_secret("github-token"), read_cost_secret("github-account")) {
+            (Some(token), Some(account)) => {
+                let url = format!(
+                    "https://api.github.com/users/{account}/settings/billing/actions"
+                );
+                match http_get_json(&url, &token).and_then(|body| {
+                    cost::parse_github_actions_billing(&body, &account, &period)
+                        .map_err(anyhow::Error::msg)
+                }) {
+                    Ok(snap) => {
+                        let conn = open_state()?;
+                        koi_core::state::record_cost_snapshot(&conn, &snap)?;
+                        taken += 1;
+                    }
+                    Err(e) => println!("github-actions: {e}"),
+                }
+            }
+            _ => println!(
+                "github-actions: needs ~/.config/koi/secrets/github-token and github-account — skipped."
+            ),
+        }
+
+        println!("Recorded {taken} snapshot(s) for {period}.");
+        println!();
+    }
+
+    let conn = open_state()?;
+    let snapshots = koi_core::state::latest_cost_snapshots(&conn)?;
+    let budgets = CostBudgets::load();
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&snapshots)?);
+        return Ok(());
+    }
+
+    if snapshots.is_empty() {
+        println!("No cost snapshots recorded yet. Run `koi cost --refresh`.");
+        return Ok(());
+    }
+
+    println!("Cost — month to date");
+    let now = chrono::Utc::now();
+    for s in &snapshots {
+        let budget = budgets.for_provider(&s.provider);
+        let flag = match cost::classify_budget(s.amount, budget) {
+            cost::BudgetState::Over => "OVER",
+            cost::BudgetState::Within => "ok",
+            cost::BudgetState::Unset => "-",
+        };
+        let stale = if cost::is_stale(s.captured_at, now) {
+            "  (stale)"
+        } else {
+            ""
+        };
+        println!(
+            "  [{flag:>4}] {:<16} {:<20} {:>8.2} {}{stale}",
+            s.provider, s.project, s.amount, s.currency
+        );
+    }
+    println!();
+    println!("  GitHub figures count PAID minutes only — a public repo is billed nothing.");
     Ok(())
 }
 
@@ -2503,6 +2680,10 @@ fn run_check(json: bool) -> Result<()> {
         Box::new(LatencyMonitor::new()),
         Box::new(WezTermMonitor::new()),
         Box::new(GhosttyMonitor::new()),
+        // Reads the persisted snapshot only — the billing API call lives in
+        // `koi cost --refresh`, because a network round trip does not fit the
+        // 200ms monitor budget (TASK-KOI238).
+        Box::new(koi_core::cost::CostMonitor::new()),
     ];
 
     let reports: Vec<_> = monitors

@@ -22,7 +22,7 @@ use crate::{
 };
 
 /// Current schema version. Bump this when adding a migration.
-const CURRENT_VERSION: u32 = 5;
+const CURRENT_VERSION: u32 = 6;
 
 const MIGRATION_V1: &str = r#"
 CREATE TABLE IF NOT EXISTS monitor_reports (
@@ -171,6 +171,22 @@ CREATE TABLE IF NOT EXISTS trash_log (
 CREATE INDEX IF NOT EXISTS idx_trash_log_restored ON trash_log(restored_at);
 "#;
 
+const MIGRATION_V6: &str = r#"
+CREATE TABLE IF NOT EXISTS cost_snapshots (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    provider    TEXT NOT NULL,
+    project     TEXT NOT NULL,
+    period      TEXT NOT NULL,   -- YYYY-MM
+    amount      REAL NOT NULL,
+    currency    TEXT NOT NULL,
+    captured_at TEXT NOT NULL
+);
+-- One row per surface per period is the useful read; the index makes "latest
+-- for this surface" cheap enough to sit inside a monitor's 200ms budget.
+CREATE INDEX IF NOT EXISTS idx_cost_snapshots_surface
+    ON cost_snapshots(provider, project, period, captured_at DESC);
+"#;
+
 fn migrate(conn: &Connection) -> Result<()> {
     let mut current: u32 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
     while current < CURRENT_VERSION {
@@ -181,6 +197,7 @@ fn migrate(conn: &Connection) -> Result<()> {
             3 => MIGRATION_V3,
             4 => MIGRATION_V4,
             5 => MIGRATION_V5,
+            6 => MIGRATION_V6,
             _ => return Err(Error::Config(format!("no migration for version {next}"))),
         };
         conn.execute_batch(sql)?;
@@ -1526,5 +1543,98 @@ mod tests {
             0,
             "rejected proposals shouldn't appear in pending"
         );
+    }
+}
+
+// -- cost_snapshots (TASK-KOI238) ------------------------------------------
+
+/// Record one surface's month-to-date spend. Append-only: successive rows for
+/// the same surface and period are the series `koi check` reads a trend from,
+/// so a refresh never overwrites the previous figure.
+pub fn record_cost_snapshot(conn: &Connection, snap: &crate::cost::CostSnapshot) -> Result<()> {
+    conn.execute(
+        "INSERT INTO cost_snapshots (provider, project, period, amount, currency, captured_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        rusqlite::params![
+            snap.provider,
+            snap.project,
+            snap.period,
+            snap.amount,
+            snap.currency,
+            snap.captured_at.to_rfc3339(),
+        ],
+    )?;
+    Ok(())
+}
+
+/// The most recent snapshot for every surface, newest first.
+///
+/// This is the read a monitor makes, so it must stay inside the 200ms budget:
+/// one indexed pass, no per-surface follow-up queries.
+pub fn latest_cost_snapshots(conn: &Connection) -> Result<Vec<crate::cost::CostSnapshot>> {
+    let mut stmt = conn.prepare(
+        "SELECT provider, project, period, amount, currency, MAX(captured_at)
+           FROM cost_snapshots
+          GROUP BY provider, project, period
+          ORDER BY provider, project",
+    )?;
+    let rows = stmt.query_map([], |r| {
+        let captured: String = r.get(5)?;
+        Ok(crate::cost::CostSnapshot {
+            provider: r.get(0)?,
+            project: r.get(1)?,
+            period: r.get(2)?,
+            amount: r.get(3)?,
+            currency: r.get(4)?,
+            captured_at: DateTime::parse_from_rfc3339(&captured)
+                .map(|d| d.with_timezone(&Utc))
+                .unwrap_or_else(|_| Utc::now()),
+        })
+    })?;
+    Ok(rows.filter_map(std::result::Result::ok).collect())
+}
+
+#[cfg(test)]
+mod cost_snapshot_tests {
+    use super::*;
+    use crate::cost::CostSnapshot;
+
+    fn snap(provider: &str, amount: f64, captured: DateTime<Utc>) -> CostSnapshot {
+        CostSnapshot {
+            provider: provider.to_string(),
+            project: "vault".to_string(),
+            period: "2026-09".to_string(),
+            amount,
+            currency: "USD".to_string(),
+            captured_at: captured,
+        }
+    }
+
+    #[test]
+    fn latest_snapshot_wins_and_history_is_kept() {
+        let conn = open_in_memory().unwrap();
+        let earlier = Utc::now() - chrono::Duration::hours(4);
+        let later = Utc::now();
+        record_cost_snapshot(&conn, &snap("railway", 3.00, earlier)).unwrap();
+        record_cost_snapshot(&conn, &snap("railway", 5.12, later)).unwrap();
+
+        let latest = latest_cost_snapshots(&conn).unwrap();
+        assert_eq!(latest.len(), 1, "one row per surface and period");
+        assert!((latest[0].amount - 5.12).abs() < f64::EPSILON);
+
+        // The earlier figure is still on disk — the series is what a trend is
+        // read from, so a refresh must never overwrite it.
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM cost_snapshots", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 2);
+    }
+
+    #[test]
+    fn surfaces_are_reported_separately() {
+        let conn = open_in_memory().unwrap();
+        record_cost_snapshot(&conn, &snap("railway", 5.12, Utc::now())).unwrap();
+        record_cost_snapshot(&conn, &snap("github-actions", 0.0, Utc::now())).unwrap();
+        assert_eq!(latest_cost_snapshots(&conn).unwrap().len(), 2);
     }
 }
