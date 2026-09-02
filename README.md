@@ -2,9 +2,12 @@
 
 **A calm, honest housekeeper for your computer.** Koi is a small daemon-in-progress
 that aims to keep your machine clean, organised, and healthy — continuously, and only
-ever with your consent. It's early: the CLI and core monitors run today (Linux-first),
-the daemon and system tray app are mid-build, and macOS/Windows support is on the
-roadmap rather than shipped.
+ever with your consent. It's early, and worth being precise about what that means: the
+CLI and core monitors run today, the daemon and tray app are mid-build, and the whole
+workspace builds and passes its tests on Linux, macOS and Windows in CI. What is not
+yet shipped is *tested desktop support* — the tray has been exercised on Linux, the
+Windows installer builds but is unsigned, and nothing has been run on real Mac
+hardware.
 
 [![CI (Linux, macOS, Windows)](https://github.com/powell-clark/koi/actions/workflows/ci.yml/badge.svg)](https://github.com/powell-clark/koi/actions/workflows/ci.yml)
 [![secret-scan](https://github.com/powell-clark/koi/actions/workflows/secret-scan.yml/badge.svg)](https://github.com/powell-clark/koi/actions/workflows/secret-scan.yml)
