@@ -69,6 +69,10 @@ enum Command {
         /// Emit machine-readable JSON.
         #[arg(long)]
         json: bool,
+        /// Print the filing taxonomy - what "organised" means on this machine -
+        /// and exit without scanning.
+        #[arg(long)]
+        explain: bool,
     },
     /// List pending filing proposals.
     Proposals {
@@ -260,7 +264,7 @@ fn main() -> Result<()> {
             status,
         } => run_backup(dry_run, include_red, status)?,
         Command::Monitor => run_monitor()?,
-        Command::Scan { json } => run_scan(json)?,
+        Command::Scan { json, explain } => run_scan(json, explain)?,
         Command::Proposals { monitor, limit } => run_proposals(monitor, limit)?,
         Command::Approve {
             all,
@@ -866,6 +870,27 @@ fn run_zones(custom_roots: Vec<std::path::PathBuf>) -> Result<()> {
                 }
             }
         }
+    }
+
+    // The taxonomy destinations are koi's own claimed space. `koi zones` is
+    // where an operator asks "what does koi consider spoken for?", so the
+    // answer has to include them, not only other systems' markers
+    // (TASK-KOI245 AC-3).
+    let filing_cfg = FilingConfig::load();
+    if let Ok(tax_root) = filing_cfg.documents_root() {
+        println!(
+            "Taxonomy destinations (koi's own, under {}):",
+            tax_root.display()
+        );
+        for (destination, description) in filing_cfg.taxonomy.entries() {
+            let marker = if tax_root.join(destination).is_dir() {
+                "present"
+            } else {
+                "pending"
+            };
+            println!("  [{marker}] {destination} - {description}");
+        }
+        println!();
     }
 
     if zones.is_empty() {
@@ -2023,8 +2048,93 @@ fn open_state() -> Result<rusqlite::Connection> {
     state::open(&path).context("open SQLite state")
 }
 
-fn run_scan(json: bool) -> Result<()> {
+/// Print the taxonomy in one screen: destination, description, and whether the
+/// directory exists yet. Read by `koi scan --explain` (TASK-KOI245 AC-4).
+fn print_taxonomy(cfg: &FilingConfig, json: bool) -> Result<()> {
+    if let Err(e) = cfg.taxonomy.validate() {
+        // A taxonomy that does not validate is the operator's to fix, and
+        // printing it as though it were fine would hide that.
+        eprintln!("warning: taxonomy is not valid: {e}");
+    }
+    let root = cfg.documents_root().unwrap_or_default();
+
+    if json {
+        let entries: Vec<_> = cfg
+            .taxonomy
+            .entries()
+            .map(|(d, desc)| {
+                serde_json::json!({
+                    "destination": d,
+                    "description": desc,
+                    "path": root.join(d),
+                    "exists": root.join(d).is_dir(),
+                })
+            })
+            .collect();
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "root": root,
+                "destinations": entries,
+            }))?
+        );
+        return Ok(());
+    }
+
+    println!("Filing taxonomy - what \"organised\" means on this machine");
+    println!("Root: {}", root.display());
+    println!();
+    let width = cfg
+        .taxonomy
+        .entries()
+        .map(|(d, _)| d.len())
+        .max()
+        .unwrap_or(0);
+    for (destination, description) in cfg.taxonomy.entries() {
+        let marker = if root.join(destination).is_dir() {
+            " "
+        } else {
+            "+"
+        };
+        println!("{marker} {destination:<width$}  {description}");
+    }
+    println!();
+    println!("  + = directory does not exist yet; `koi scan` creates it.");
+    Ok(())
+}
+
+fn run_scan(json: bool, explain: bool) -> Result<()> {
     let filing_cfg = FilingConfig::load();
+
+    // --explain answers "where would my files go, and why" without touching
+    // anything. It is the screen the operator reads before approving rules
+    // (TASK-KOI245 AC-4).
+    if explain {
+        return print_taxonomy(&filing_cfg, json);
+    }
+
+    // Taxonomy destinations are created up front and idempotently, so a rule
+    // that routes to one cannot fail for want of a directory (AC-3).
+    match filing_cfg.ensure_taxonomy_dirs() {
+        Ok(report) => {
+            if !report.created.is_empty() && !json {
+                println!("Created {} taxonomy destination(s):", report.created.len());
+                for p in &report.created {
+                    println!("  {}", p.display());
+                }
+                println!();
+            }
+            if !report.managed.is_empty() && !json {
+                println!(
+                    "Skipped {} destination(s) inside a managed zone.",
+                    report.managed.len()
+                );
+            }
+        }
+        // A taxonomy directory koi cannot create is worth saying out loud, but
+        // it must not stop the scan: the extension rules still work.
+        Err(e) => eprintln!("warning: could not create taxonomy destinations: {e}"),
+    }
     let mut monitors: Vec<Box<dyn FileMonitor>> = vec![
         Box::new(DownloadsMonitor::from_config(&filing_cfg).context("DownloadsMonitor init")?),
         Box::new(DocumentsMonitor::from_config(&filing_cfg).context("DocumentsMonitor init")?),
