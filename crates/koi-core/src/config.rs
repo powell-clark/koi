@@ -20,6 +20,11 @@ pub struct FilingConfig {
     pub dedupe: DedupeConfig,
     pub trash: TrashConfig,
     pub taxonomy: TaxonomyConfig,
+    /// Ordered content-aware rules, evaluated before the extension buckets
+    /// (TASK-KOI246). Empty in the file means "use the shipped seed table";
+    /// an operator who writes any `[[rules]]` entry replaces it wholesale, so
+    /// what they read in the file is what runs.
+    pub rules: Vec<crate::filing::rules::FilingRule>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default, PartialEq, Eq)]
@@ -245,6 +250,16 @@ impl Default for TaxonomyConfig {
 }
 
 impl FilingConfig {
+    /// The rule table actually in force: the operator's `[[rules]]` if they
+    /// wrote any, otherwise the shipped seed table.
+    pub fn rule_set(&self) -> crate::filing::rules::RuleSet {
+        if self.rules.is_empty() {
+            crate::filing::rules::RuleSet::seed()
+        } else {
+            crate::filing::rules::RuleSet::new(self.rules.clone())
+        }
+    }
+
     /// The documents root the taxonomy hangs off: the configured override, or
     /// `$HOME/Documents`. Same resolution `DocumentsMonitor::from_config` uses,
     /// so `koi scan` cannot create the taxonomy under a different root from the

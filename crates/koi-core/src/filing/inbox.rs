@@ -6,6 +6,7 @@
 //! everything that gets classified, with a lower default confidence than DownloadsMonitor
 //! so ambiguous items surface multiple candidate destinations (future UI).
 
+use crate::filing::rules::RuleSet;
 use std::{
     ffi::OsStr,
     path::{Path, PathBuf},
@@ -20,6 +21,7 @@ use crate::{
 pub struct InboxMonitor {
     root: PathBuf,
     docs: PathBuf,
+    rules: crate::filing::rules::RuleSet,
 }
 
 impl InboxMonitor {
@@ -28,6 +30,7 @@ impl InboxMonitor {
         Ok(Self {
             root: home.join("inbox"),
             docs: home.join("Documents"),
+            rules: RuleSet::seed(),
         })
     }
 
@@ -35,6 +38,7 @@ impl InboxMonitor {
         Self {
             root: inbox,
             docs: documents,
+            rules: RuleSet::seed(),
         }
     }
 
@@ -48,6 +52,7 @@ impl InboxMonitor {
                 .inbox
                 .clone()
                 .unwrap_or_else(|| home.join("inbox")),
+            rules: cfg.rule_set(),
             docs: cfg
                 .roots
                 .documents
@@ -63,6 +68,35 @@ impl InboxMonitor {
             .to_ascii_lowercase();
         let filename = path.file_name()?;
         let suffix = format!(".{ext}");
+
+        // Order note (TASK-KOI246 AC-7, and a deviation worth reading).
+        //
+        // AC-7 asks that the learned classifier override a seed rule "for a
+        // filename it has a decision for". It cannot: `Classifier::suggest`
+        // keys on the SUFFIX, not the filename, so the only opinion it can
+        // offer here is extension-shaped. Letting that win would mean a
+        // learned `.pdf -> Documents/PDFs` entry silently defeating the Health
+        // rule for `patient-statement-*.pdf` — reinstating the exact flat
+        // bucket STORY-KOI072 exists to remove, on the strength of 414
+        // decisions that WORK-KOI105 and INC-KOI025 record as an agent sweep
+        // rather than the operator's own approvals.
+        //
+        // So a filename rule wins over an extension-keyed suggestion, and the
+        // learner keeps its precedence everywhere it actually has one: every
+        // file no rule claims. When TASK-KOI249 rebuilds the learner from the
+        // operator's approvals and it gains filename-level decisions, that
+        // decision should move back in front of the table.
+        // Content-aware rules before the extension buckets (TASK-KOI246).
+        if let Some(rule) = filename
+            .to_str()
+            .and_then(|name| self.rules.first_match(name))
+        {
+            return Some((
+                self.docs.join(&rule.destination).join(filename),
+                "filename rule",
+                0.85,
+            ));
+        }
 
         if let Some(classifier) = &ctx.classifier {
             if let Some((learned_dir, conf)) = classifier.suggest("InboxMonitor", &suffix) {

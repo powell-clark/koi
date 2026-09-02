@@ -8,6 +8,7 @@
 //! Depth: root only (no recursion). Subdirectory contents are assumed to be
 //! already-filed; koi doesn't re-file them.
 
+use crate::filing::rules::RuleSet;
 use std::{
     ffi::OsStr,
     path::{Path, PathBuf},
@@ -21,6 +22,7 @@ use crate::{
 
 pub struct DocumentsMonitor {
     root: PathBuf,
+    rules: crate::filing::rules::RuleSet,
 }
 
 impl DocumentsMonitor {
@@ -28,11 +30,15 @@ impl DocumentsMonitor {
         let home = crate::state::home_dir()?;
         Ok(Self {
             root: home.join("Documents"),
+            rules: RuleSet::seed(),
         })
     }
 
     pub fn with_root(root: PathBuf) -> Self {
-        Self { root }
+        Self {
+            root,
+            rules: RuleSet::seed(),
+        }
     }
 
     /// Like [`Self::new`], but a configured root override (if present) wins
@@ -45,6 +51,7 @@ impl DocumentsMonitor {
                 .documents
                 .clone()
                 .unwrap_or_else(|| home.join("Documents")),
+            rules: cfg.rule_set(),
         })
     }
 
@@ -62,6 +69,18 @@ impl DocumentsMonitor {
                     return Some((learned_dir.join(filename), "learned from approvals", conf));
                 }
             }
+        }
+
+        // Content-aware rules before the extension buckets (TASK-KOI246).
+        if let Some(rule) = filename
+            .to_str()
+            .and_then(|name| self.rules.first_match(name))
+        {
+            return Some((
+                self.root.join(&rule.destination).join(filename),
+                "filename rule",
+                0.85,
+            ));
         }
 
         let (subdir, rationale, confidence) = match ext.as_str() {

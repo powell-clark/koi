@@ -13,6 +13,7 @@ pub mod inbox;
 pub mod managed_zone;
 pub mod proposal;
 pub mod root_clutter;
+pub mod rules;
 
 pub use classifier::{Classifier, SqliteClassifier};
 pub use documents::DocumentsMonitor;
