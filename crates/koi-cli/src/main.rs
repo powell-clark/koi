@@ -430,16 +430,23 @@ fn run_audit(quick: bool) -> Result<()> {
     // scraping stdout. `--quiet` used to be passed here, which suppressed the
     // stdout summary this parser needs, so every run from 2026-08-16 onward
     // recorded ?/100 while appearing to succeed (TASK-KOI108).
-    let hardening_index = std::fs::read_to_string(&report_dat_path)
-        .ok()
-        .and_then(|dat| parse_report_hardening_index(&dat))
+    let report_dat = std::fs::read_to_string(&report_dat_path).ok();
+    let hardening_index = report_dat
+        .as_deref()
+        .and_then(parse_report_hardening_index)
         .or_else(|| parse_lynis_hardening_index(&stdout));
     let lynis_version = parse_lynis_version(&stdout);
 
-    if let Some(score) = hardening_index {
-        println!("Hardening index: {score}/100");
-    } else {
-        println!("Hardening index: (not found in output)");
+    match hardening_index {
+        Some(score) => println!("Hardening index: {score}/100"),
+        // TASK-KOI233 AC-4. "(not found in output)" used to cover three
+        // different situations, so a year of logs could not tell a broken
+        // parser from a scan that never got far enough to score itself. Each
+        // now names what actually happened and what to do about it.
+        None => println!(
+            "Hardening index: {}",
+            describe_missing_index(report_dat.as_deref())
+        ),
     }
     println!("Report saved: {}", report_path.display());
 
@@ -548,6 +555,29 @@ Report: {}",
             &body,
         ])
         .status();
+}
+
+/// Say WHY there is no hardening index, distinguishing the three cases that
+/// used to share one message (TASK-KOI233 AC-4):
+///
+/// - no report file at all: Lynis did not get far enough to write one, so the
+///   scan failed rather than the parser
+/// - a report that carries no `hardening_index` key: Lynis ran but did not
+///   score the host, which is what a partial or aborted profile looks like
+/// - a report carrying the key with a value that will not parse: a genuine
+///   parse failure, and the only one of the three that is koi's bug
+fn describe_missing_index(report_dat: Option<&str>) -> &'static str {
+    let Some(dat) = report_dat else {
+        return "(no report file written — the Lynis run itself failed)";
+    };
+    match dat
+        .lines()
+        .filter_map(|line| line.split_once('='))
+        .find(|(key, _)| key.trim() == "hardening_index")
+    {
+        None => "(not scored by Lynis — the report has no hardening_index)",
+        Some(_) => "(unparseable hardening_index in the report — this is a koi bug)",
+    }
 }
 
 // Read the hardening index out of a Lynis `--report-file` .dat, which is
@@ -2934,5 +2964,33 @@ mod tests {
             validate_id_prefix("57090b98b6020807").unwrap(),
             "57090b98b6020807"
         );
+    }
+
+    #[test]
+    fn missing_index_names_which_of_the_three_failures_it_was() {
+        // TASK-KOI233 AC-4: these three shared one message until 2026-09-02,
+        // so a log could not tell a koi bug from a scan that never scored.
+        assert!(describe_missing_index(None).contains("run itself failed"));
+        assert!(
+            describe_missing_index(Some("lynis_version=3.0.9\nwarning[]=x\n"))
+                .contains("no hardening_index")
+        );
+        assert!(describe_missing_index(Some("hardening_index=not-a-number\n")).contains("koi bug"));
+    }
+
+    #[test]
+    fn a_scored_report_is_not_described_as_missing() {
+        // Guard against the helper being reached on the happy path.
+        assert_eq!(
+            parse_report_hardening_index("hardening_index=18\n"),
+            Some(18)
+        );
+    }
+
+    #[test]
+    fn previous_run_score_is_not_mistaken_for_this_one() {
+        // Lynis writes both keys; a prefix match would return the older score.
+        let dat = "hardening_index_previous=42\nhardening_index=18\n";
+        assert_eq!(parse_report_hardening_index(dat), Some(18));
     }
 }
