@@ -16,6 +16,7 @@ pub mod monitors;
 pub mod notes;
 pub mod sensors;
 pub mod state;
+pub mod subscriptions;
 pub mod trash;
 pub mod types;
 pub mod worklog;

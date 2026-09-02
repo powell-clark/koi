@@ -407,6 +407,42 @@ impl crate::monitor::Monitor for CostMonitor {
             });
         }
 
+        // Renewal warnings (TASK-KOI239 AC-4). The register is the operator's
+        // own confirmed list, so an entry here is a commitment they have
+        // acknowledged rather than a figure koi inferred.
+        let register = crate::subscriptions::Register::load();
+        let today = now.date_naive();
+        let due = crate::subscriptions::renewals_within(&register.subscriptions, today, 7);
+        if !due.is_empty() {
+            status = HealthStatus::Warning;
+            for sub in &due {
+                suggestions.push(Suggestion {
+                    message: format!(
+                        "{} renews on {} ({:.2} {}).",
+                        sub.provider,
+                        sub.next_renewal.as_deref().unwrap_or("soon"),
+                        sub.amount,
+                        sub.currency
+                    ),
+                    severity: Severity::Warning,
+                    action_hint: Some("koi costs list".to_string()),
+                });
+            }
+            observations.push(Observation {
+                key: "cost.renewals_within_7d".to_string(),
+                value: serde_json::json!(due.len()),
+                severity: Severity::Warning,
+            });
+        }
+
+        for (currency, total) in crate::subscriptions::monthly_totals(&register.subscriptions) {
+            observations.push(Observation {
+                key: format!("cost.subscriptions.monthly.{currency}"),
+                value: serde_json::json!(total),
+                severity: Severity::Info,
+            });
+        }
+
         Ok(MonitorReport {
             monitor: "CostMonitor".to_string(),
             status,

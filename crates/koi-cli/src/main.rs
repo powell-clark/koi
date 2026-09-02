@@ -31,6 +31,23 @@ struct Cli {
 }
 
 #[derive(Subcommand)]
+enum CostsAction {
+    /// List the register with monthly-equivalent totals per currency.
+    List,
+    /// Read receipts already filed on disk and propose register rows.
+    /// Writes candidates as unconfirmed; nothing enters a total until
+    /// `koi costs confirm` accepts it.
+    Seed {
+        /// Directories to read receipts from (default: Documents/PDFs-Inbox,
+        /// Documents/PDFs, inbox).
+        #[arg(long)]
+        dir: Vec<std::path::PathBuf>,
+    },
+    /// Confirm a seeded row by provider name, so it counts toward totals.
+    Confirm { provider: String },
+}
+
+#[derive(Subcommand)]
 enum Command {
     /// Run system health diagnostics.
     Check {
@@ -128,6 +145,11 @@ enum Command {
     ///
     /// Example: `koi completions bash > ~/.local/share/bash-completion/completions/koi`
     Completions { shell: Shell },
+    /// Subscription and renewal register (TASK-KOI239).
+    Costs {
+        #[command(subcommand)]
+        action: CostsAction,
+    },
     /// Show cost posture per surface; --refresh reads the billing APIs first.
     Cost {
         /// Call the Railway and GitHub billing APIs and persist a fresh
@@ -292,6 +314,7 @@ fn main() -> Result<()> {
             let mut cmd = Cli::command();
             generate(shell, &mut cmd, "koi", &mut std::io::stdout());
         }
+        Command::Costs { action } => run_costs(action)?,
         Command::Cost { refresh, json } => run_cost(refresh, json)?,
         Command::Zones { root } => run_zones(root)?,
         Command::Worklog { limit } => run_jsonl_tail(
@@ -946,6 +969,184 @@ fn http_get_json(url: &str, token: &str) -> Result<String> {
 
 fn current_period() -> String {
     chrono::Utc::now().format("%Y-%m").to_string()
+}
+
+/// Receipt text via poppler's `pdftotext`, which is already how koi reads PDFs
+/// elsewhere on this host. A missing binary is reported once, not per file.
+fn receipt_text(path: &std::path::Path) -> Option<String> {
+    let out = std::process::Command::new("pdftotext")
+        .arg("-layout")
+        .arg(path)
+        .arg("-")
+        .output()
+        .ok()?;
+    out.status
+        .success()
+        .then(|| String::from_utf8_lossy(&out.stdout).to_string())
+}
+
+fn run_costs(action: CostsAction) -> Result<()> {
+    use koi_core::subscriptions::{
+        candidate_from_receipts, monthly_totals, renewals_within, Cadence, Register,
+    };
+
+    match action {
+        CostsAction::Seed { dir } => {
+            if which_pdftotext().is_none() {
+                anyhow::bail!(
+                    "pdftotext not found — install poppler-utils, or add rows by hand to \
+                     ~/.config/koi/subscriptions.toml"
+                );
+            }
+            let home = koi_core::state::home_dir()?;
+            let dirs = if dir.is_empty() {
+                vec![
+                    home.join("Documents/PDFs-Inbox"),
+                    home.join("Documents/PDFs"),
+                    home.join("inbox"),
+                ]
+            } else {
+                dir
+            };
+
+            // Group facts by provider before inferring anything: cadence is a
+            // property of a provider's series, never of one receipt.
+            let mut by_provider: std::collections::BTreeMap<
+                String,
+                Vec<koi_core::subscriptions::ReceiptFacts>,
+            > = std::collections::BTreeMap::new();
+            let mut read = 0usize;
+
+            for d in &dirs {
+                let Ok(entries) = std::fs::read_dir(d) else {
+                    continue;
+                };
+                for entry in entries.filter_map(std::result::Result::ok) {
+                    let path = entry.path();
+                    if path.extension().and_then(|e| e.to_str()) != Some("pdf") {
+                        continue;
+                    }
+                    read += 1;
+                    if let Some(facts) = receipt_text(&path)
+                        .and_then(|t| koi_core::subscriptions::parse_receipt_text(&t))
+                    {
+                        by_provider
+                            .entry(facts.provider.clone())
+                            .or_default()
+                            .push(facts);
+                    }
+                }
+            }
+
+            let candidates: Vec<_> = by_provider
+                .iter()
+                .filter_map(|(provider, facts)| candidate_from_receipts(provider, facts))
+                .collect();
+
+            let mut register = Register::load();
+            let added = register.merge_candidates(candidates.clone());
+            register.save()?;
+
+            println!(
+                "Read {read} PDF(s); recognised {} provider(s).",
+                by_provider.len()
+            );
+            for c in &candidates {
+                let cadence = match c.cadence {
+                    Cadence::Monthly => "monthly",
+                    Cadence::Yearly => "yearly",
+                    Cadence::OneOff => "one-off",
+                };
+                println!(
+                    "  {:<14} {:>8.2} {}  {cadence:<8} from {}",
+                    c.provider, c.amount, c.currency, c.source
+                );
+            }
+            println!();
+            println!(
+                "{added} new row(s) written to ~/.config/koi/subscriptions.toml, unconfirmed."
+            );
+            println!("Nothing counts toward a total until you run `koi costs confirm <provider>`.");
+        }
+
+        CostsAction::Confirm { provider } => {
+            let mut register = Register::load();
+            let Some(row) = register
+                .subscriptions
+                .iter_mut()
+                .find(|s| s.provider.eq_ignore_ascii_case(&provider))
+            else {
+                anyhow::bail!("no register row for {provider} — run `koi costs seed` first");
+            };
+            row.confirmed = true;
+            let name = row.provider.clone();
+            register.save()?;
+            println!("Confirmed {name}; it now counts toward the monthly total.");
+        }
+
+        CostsAction::List => {
+            let register = Register::load();
+            if register.subscriptions.is_empty() {
+                println!("Register is empty. Run `koi costs seed` to propose rows from receipts.");
+                return Ok(());
+            }
+            println!("Subscriptions");
+            for s in &register.subscriptions {
+                let cadence = match s.cadence {
+                    Cadence::Monthly => "monthly",
+                    Cadence::Yearly => "yearly",
+                    Cadence::OneOff => "one-off",
+                };
+                let mark = if s.confirmed { " " } else { "?" };
+                println!(
+                    "{mark} {:<14} {:>8.2} {:<4} {cadence:<8} next {}",
+                    s.provider,
+                    s.amount,
+                    s.currency,
+                    s.next_renewal.as_deref().unwrap_or("-")
+                );
+            }
+            println!();
+            let totals = monthly_totals(&register.subscriptions);
+            if totals.is_empty() {
+                println!("Monthly equivalent: nothing confirmed yet.");
+            } else {
+                for (currency, total) in &totals {
+                    println!("Monthly equivalent: {total:.2} {currency}");
+                }
+                // Deliberately no combined figure: converting needs a rate and
+                // a date, and a confidently wrong total is worse than two.
+            }
+            let today = chrono::Local::now().date_naive();
+            let due = renewals_within(&register.subscriptions, today, 7);
+            if !due.is_empty() {
+                println!();
+                println!("Renewing within 7 days:");
+                for s in due {
+                    println!(
+                        "  {} on {}",
+                        s.provider,
+                        s.next_renewal.as_deref().unwrap_or("-")
+                    );
+                }
+            }
+            println!();
+            println!("  ? = seeded from a receipt, not yet confirmed; excluded from totals.");
+        }
+    }
+    Ok(())
+}
+
+fn which_pdftotext() -> Option<std::path::PathBuf> {
+    std::process::Command::new("pdftotext")
+        .arg("-v")
+        .output()
+        .ok()
+        .and_then(|o| {
+            o.status
+                .success()
+                .then(|| std::path::PathBuf::from("pdftotext"))
+        })
 }
 
 fn run_cost(refresh: bool, json: bool) -> Result<()> {
