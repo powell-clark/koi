@@ -1,0 +1,35 @@
+[Unit]
+Description=Koi filing scan - emit proposals for loose files
+Documentation=https://github.com/powell-clark/koi
+After=network.target
+
+[Service]
+Type=oneshot
+# The INSTALLED binary, never the build tree: cargo clean deleted
+# target/release/koi on 2026-08-29 and the audit units failed 203/EXEC the next
+# day (INC-KOI028, fixed for those units by TASK-KOI230).
+ExecStart=%h/.cargo/bin/koi scan
+WorkingDirectory=%h
+
+StandardOutput=append:%h/.local/state/koi/koi-scan.log
+StandardError=append:%h/.local/state/koi/koi-scan-error.log
+
+# `koi scan` emits proposals and never moves a user file - consent is the
+# separate `koi approve` step - so this unit needs read over the accumulation
+# points and write only to koi's own state plus the taxonomy directories it
+# creates under Documents.
+ReadOnlyPaths=%h/Downloads %h/inbox
+ReadWritePaths=%h/.local/share/koi %h/.local/state/koi %h/.cache/koi %h/Documents
+
+# Deliberately NOT InaccessiblePaths=%h/Documents/Personal, which the
+# health-check unit carries: the taxonomy files identity and travel documents
+# to Personal/Identity and Personal/Travel (TASK-KOI245), so hiding that
+# subtree would make the scan unable to create or propose into it. Secrets that
+# have nothing to do with filing stay hidden.
+InaccessiblePaths=%h/.private %h/.ssh %h/.gnupg %h/.gdfuse
+
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=default.target

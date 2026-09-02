@@ -1,0 +1,18 @@
+[Unit]
+Description=Run the Koi filing scan hourly
+Requires=koi-scan.service
+
+[Timer]
+OnCalendar=hourly
+# A missed run is caught up on the next boot. Safe here, unlike
+# koi-backup.timer: a scan is read-only, takes ~40ms measured on 2026-09-02,
+# and always finishes inside an uptime window. That is the distinction
+# TASK-KOI192 records - Persistent is wrong for jobs longer than the uptime
+# window, not wrong in itself.
+Persistent=true
+# Avoid every koi timer firing on the same second.
+RandomizedDelaySec=300
+Unit=koi-scan.service
+
+[Install]
+WantedBy=timers.target
