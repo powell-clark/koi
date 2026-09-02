@@ -56,7 +56,11 @@ cargo build --release
 # the CLI is target/release/koi
 ```
 
-Packaged installers (`.deb`, `.dmg`, `.msi`) and a tray-on-login app are on the roadmap.
+Packaged installers for the tray app are built on demand by the
+[`koi-tray` workflow](../../actions/workflows/koi-tray.yml) — a Debian `.deb`
+on Linux and an NSIS `-setup.exe` on Windows, downloadable as run artefacts.
+They are unsigned. macOS is not yet shipped: a `.dmg` builds in the same
+workflow, but nothing on macOS has been installed or tested on real hardware.
 
 ## Usage
 
