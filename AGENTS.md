@@ -42,6 +42,11 @@ The repo is public. main is protected (required PR, required gitleaks check, no 
 Commit prefixes: feat, fix, chore, refactor, docs, test — wip:/attempt: until verified working. Authorship and attribution rules are global (AGENTS.md at ~/.llm-global/).
 </git-workflow-and-public-repo-safety>
 
+<runtime-acceptance>
+`cargo build` proves the source; it proves nothing about the machine. `koi check`, the audit units and every timer run `~/.cargo/bin/koi`, so a green workspace and a stale installed binary look identical from the repo — measured twice on 2026-09-02, where a three-day-old binary made every audit report a missing hardening index (TASK-KOI233), and five commits later three shipped monitors were true of the source and absent from the running system.
+Any task whose acceptance depends on runtime behaviour is not done until the binary is reinstalled and the behaviour observed: `cargo install --path crates/koi-cli --force`, back up the outgoing binary first (`cp ~/.cargo/bin/koi ~/.cargo/bin/koi.pre-<marker>`), then run the command whose output the criterion names and read it. "Reinstall and observe" belongs in the definition of done, not in a follow-up.
+</runtime-acceptance>
+
 <monitors>
 Seven monitors: DiskMonitor (directory growth), MemoryMonitor (oomd events, pressure), CacheMonitor (stale caches), DockerMonitor (unused images, volumes, containers), GitMonitor (uncommitted and unpushed work across projects), PackageMonitor (apt, npm, pip; brew on macOS), FileMonitor (accumulation points, filing proposals).
 - Monitors 1–6 complete within 200ms combined; FileMonitor runs on its own slower schedule.
