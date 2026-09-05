@@ -350,7 +350,11 @@ mod tests {
     fn no_peer_snapshot_yet_is_silence_not_a_mismatch() {
         let own = BTreeMap::from([("dotfiles".to_string(), fp("abc", "/home/me/.git/HEAD"))]);
         let peers = BTreeMap::new(); // TASK-KOI258 not landed: no peer has ever synced.
-        let classes = [class("dotfiles-sync", "dotfiles", &["workstation", "laptop"])];
+        let classes = [class(
+            "dotfiles-sync",
+            "dotfiles",
+            &["workstation", "laptop"],
+        )];
         let classes_ref: Vec<&EquivalenceClass> = classes.iter().collect();
         let out = compare(&own, &peers, &classes_ref, |_| false);
         assert!(out.is_empty());
