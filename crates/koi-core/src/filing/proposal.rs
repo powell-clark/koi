@@ -46,6 +46,10 @@ impl ProposalId {
                 remote_src.hash(&mut hasher);
                 remote_dest.hash(&mut hasher);
             }
+            ProposedAction::Review { summary } => {
+                "Review".hash(&mut hasher);
+                summary.hash(&mut hasher);
+            }
         }
         ProposalId(format!("{:016x}", hasher.finish()))
     }
@@ -70,6 +74,11 @@ pub enum ProposedAction {
         remote_src: String,
         remote_dest: String,
     },
+    /// Flag a fact for a human to look at — no file operation of any kind.
+    /// For discrepancies that are not about a file at all (ADR-0024: a
+    /// cross-machine fleet-config mismatch), where the only "action" koi may
+    /// ever take unattended is to say so.
+    Review { summary: String },
 }
 
 /// How much authority koi needs to execute the action.
@@ -107,7 +116,7 @@ impl Proposal {
     ) -> Self {
         let id = ProposalId::compute(monitor, &path, &action);
         let autonomy_tier = match action {
-            ProposedAction::Delete => AutonomyTier::Human,
+            ProposedAction::Delete | ProposedAction::Review { .. } => AutonomyTier::Human,
             ProposedAction::Ignore { .. } | ProposedAction::Tag { .. } => AutonomyTier::Full,
             ProposedAction::Move { .. }
             | ProposedAction::Archive { .. }
@@ -210,6 +219,23 @@ mod tests {
             plain.id, raised.id,
             "raising the tier must not change the proposal identity"
         );
+    }
+
+    #[test]
+    fn review_is_human_tier() {
+        // ADR-0024: a fleet discrepancy is never auto-applied, so Review is
+        // human-tier from construction rather than needing
+        // requiring_human_review() to raise it there.
+        let p = Proposal::new(
+            "FleetConfigMonitor",
+            PathBuf::from("/home/user/.bashrc"),
+            ProposedAction::Review {
+                summary: "shell-config differs from peer laptop".into(),
+            },
+            "r",
+            0.9,
+        );
+        assert_eq!(p.autonomy_tier, AutonomyTier::Human);
     }
 
     #[test]

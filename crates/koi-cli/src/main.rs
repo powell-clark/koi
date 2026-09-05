@@ -6,8 +6,9 @@ use koi_core::{
     config::FilingConfig,
     dedupe,
     filing::{
-        self, DocumentsMonitor, DownloadsMonitor, FileMonitor, GoogleDriveMonitor, InboxMonitor,
-        Outcome, ProposalId, ProposedAction, RootClutterMonitor, ScanContext, SqliteClassifier,
+        self, DocumentsMonitor, DownloadsMonitor, FileMonitor, FleetConfigMonitor,
+        GoogleDriveMonitor, InboxMonitor, Outcome, ProposalId, ProposedAction, RootClutterMonitor,
+        ScanContext, SqliteClassifier,
     },
     monitors::{
         BackupMonitor, CacheMonitor, DiskMonitor, DockerMonitor, GhosttyMonitor, GitMonitor,
@@ -2791,6 +2792,7 @@ fn run_scan(json: bool, explain: bool) -> Result<()> {
         Box::new(DocumentsMonitor::from_config(&filing_cfg).context("DocumentsMonitor init")?),
         Box::new(InboxMonitor::from_config(&filing_cfg).context("InboxMonitor init")?),
         Box::new(RootClutterMonitor::from_config(&filing_cfg).context("RootClutterMonitor init")?),
+        Box::new(FleetConfigMonitor::new().context("FleetConfigMonitor init")?),
     ];
     if let Some(gdrive) = GoogleDriveMonitor::load() {
         monitors.push(Box::new(gdrive));
@@ -2869,6 +2871,7 @@ fn run_scan(json: bool, explain: bool) -> Result<()> {
             ProposedAction::DriveMove { remote_dest, .. } => {
                 format!("drive → {remote_dest}")
             }
+            ProposedAction::Review { summary } => format!("review: {summary}"),
         };
         println!(
             "  [{} {:.0}%] {} {}\n         from {}",

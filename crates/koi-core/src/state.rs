@@ -660,6 +660,7 @@ fn serialize_action(action: &ProposedAction) -> Result<(&'static str, String)> {
         ProposedAction::Tag { .. } => "tag",
         ProposedAction::Ignore { .. } => "ignore",
         ProposedAction::DriveMove { .. } => "drive_move",
+        ProposedAction::Review { .. } => "review",
     };
     Ok((kind, serde_json::to_string(action)?))
 }

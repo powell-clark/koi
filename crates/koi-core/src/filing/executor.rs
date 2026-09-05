@@ -33,6 +33,9 @@ pub fn apply(source: &Path, action: &ProposedAction) -> Outcome {
             remote_src,
             remote_dest,
         } => apply_drive_move(remote_src, remote_dest),
+        ProposedAction::Review { .. } => {
+            Outcome::Skipped("review is informational-only; no file action".into())
+        }
     }
 }
 
